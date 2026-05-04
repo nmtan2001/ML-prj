@@ -49,7 +49,7 @@ def main():
     print("=" * 60)
     demand_results = train_demand_models(df, target="departures")
     for r in demand_results:
-        print(f"  {r['model']:20s} MAE={r['MAE']:.4f}  RMSE={r['RMSE']:.4f}")
+        print(f"  {r['model']:20s} MAE={r['MAE']:.4f}  RMSE={r['RMSE']:.4f}  MAPE={r['MAPE']:.1f}%")
 
     fig = plot_model_comparison(demand_results, "MAE", title="Task 1: MAE Comparison")
     fig.savefig("output_demand_mae.png", dpi=150, bbox_inches="tight")
@@ -65,7 +65,7 @@ def main():
     print("=" * 60)
     risk_results = train_risk_models(df, target="is_high_risk")
     for r in risk_results:
-        print(f"  {r['model']:20s} Acc={r['Accuracy']:.4f}  F1={r['F1']:.4f}")
+        print(f"  {r['model']:20s} Acc={r['Accuracy']:.4f}  F1={r['F1']:.4f}  Prec={r['Precision']:.4f}  Rec={r['Recall']:.4f}")
 
     from evaluate import plot_confusion_matrix
     best_risk = max(risk_results, key=lambda r: r["F1"])
