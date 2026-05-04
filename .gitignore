@@ -11,4 +11,5 @@ wheels/
 
 #images
 *.png
+data/raw/
 *.csv
