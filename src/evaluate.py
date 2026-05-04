@@ -7,8 +7,12 @@ from sklearn.metrics import (
     confusion_matrix,
     f1_score,
     mean_absolute_error,
+    precision_score,
+    recall_score,
     root_mean_squared_error,
     r2_score,
+    roc_auc_score,
+    average_precision_score,
 )
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -16,21 +20,35 @@ import seaborn as sns
 
 def regression_metrics(y_true: pd.Series, y_pred: pd.Series, label: str = "") -> dict:
     """Compute regression metrics."""
+    mae = mean_absolute_error(y_true, y_pred)
+    # MAPE with protection against division by zero
+    mask = y_true != 0
+    mape = np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask])) * 100 if mask.any() else 0
     return {
         "model": label,
-        "MAE": mean_absolute_error(y_true, y_pred),
+        "MAE": mae,
         "RMSE": root_mean_squared_error(y_true, y_pred),
         "R2": r2_score(y_true, y_pred),
+        "MAPE": mape,
     }
 
 
-def classification_metrics(y_true: pd.Series, y_pred: pd.Series, label: str = "") -> dict:
+def classification_metrics(y_true: pd.Series, y_pred: pd.Series, label: str = "",
+                           y_proba: pd.Series = None) -> dict:
     """Compute classification metrics."""
-    return {
+    result = {
         "model": label,
         "Accuracy": accuracy_score(y_true, y_pred),
         "F1": f1_score(y_true, y_pred, zero_division=0),
+        "Precision": precision_score(y_true, y_pred, zero_division=0),
+        "Recall": recall_score(y_true, y_pred, zero_division=0),
     }
+    if y_proba is not None:
+        try:
+            result["PR-AUC"] = average_precision_score(y_true, y_proba)
+        except ValueError:
+            pass
+    return result
 
 
 def plot_confusion_matrix(y_true, y_pred, labels=None, title="Confusion Matrix"):
