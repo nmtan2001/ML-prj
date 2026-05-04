@@ -1,10 +1,12 @@
 """Task 2: Station risk classification models."""
 
+import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
+from sklearn.metrics import f1_score
 from xgboost import XGBClassifier
 
 from src.evaluate import classification_metrics
@@ -13,8 +15,10 @@ from src.evaluate import classification_metrics
 FEATURE_COLS_RISK = [
     "hour_of_day", "day_of_week", "is_weekend", "is_rush_hour",
     "hour_sin", "hour_cos", "dow_sin", "dow_cos",
+    "weekend_x_hour", "rush_x_weekend",
     "departures_lag_1h", "departures_lag_2h", "departures_lag_3h",
-    "departures_lag_24h", "departures_lag_168h",
+    "departures_lag_12h", "departures_lag_24h", "departures_lag_48h",
+    "departures_lag_168h",
     "departures_roll_mean_3h", "departures_roll_mean_6h",
     "departures_roll_mean_12h", "departures_roll_mean_24h",
     "departures_roll_std_3h", "departures_roll_std_6h",
@@ -23,8 +27,26 @@ FEATURE_COLS_RISK = [
     "latitude", "longitude",
     "bikes_available_lag_1h",
     "dock_utilization_lag_1h",
-    "temperature_lag1", "humidity_lag1", "precipitation_lag1", "wind_speed_lag1",
+    "temperature", "humidity", "precipitation", "wind_speed",
+    "is_precipitating", "precipitation_x_weekend",
+    "station_mean_demand", "station_hour_mean", "station_weekend_ratio",
 ]
+
+
+def _find_best_threshold(model, X_val, y_val) -> float:
+    """Find decision threshold that maximizes F1 on validation set."""
+    if hasattr(model, "predict_proba"):
+        y_proba = model.predict_proba(X_val)[:, 1]
+    else:
+        return 0.5
+    best_thresh, best_f1 = 0.5, 0.0
+    for thresh in np.arange(0.1, 0.9, 0.05):
+        y_pred = (y_proba >= thresh).astype(int)
+        f1 = f1_score(y_val, y_pred, zero_division=0)
+        if f1 > best_f1:
+            best_f1 = f1
+            best_thresh = thresh
+    return best_thresh
 
 
 def train_risk_models(df: pd.DataFrame, target: str = "is_high_risk") -> list[dict]:
@@ -32,6 +54,7 @@ def train_risk_models(df: pd.DataFrame, target: str = "is_high_risk") -> list[di
 
     Uses StandardScaler for LogisticRegression via Pipeline.
     Computes class imbalance ratio for XGBoost scale_pos_weight.
+    Tunes decision threshold on validation set for each model.
     Returns results with y_test and y_pred for confusion matrix plotting.
     """
     from src.models.demand import time_split
@@ -40,6 +63,7 @@ def train_risk_models(df: pd.DataFrame, target: str = "is_high_risk") -> list[di
     train, val, test = time_split(df)
 
     X_train, y_train = train[available_features], train[target]
+    X_val, y_val = val[available_features], val[target]
     X_test, y_test = test[available_features], test[target]
 
     # Compute class imbalance ratio for XGBoost
@@ -53,19 +77,33 @@ def train_risk_models(df: pd.DataFrame, target: str = "is_high_risk") -> list[di
             ("clf", LogisticRegression(max_iter=2000, class_weight="balanced", solver="lbfgs")),
         ]),
         "RandomForest": RandomForestClassifier(
-            n_estimators=100, random_state=42, n_jobs=-1, class_weight="balanced",
+            n_estimators=200, random_state=42, n_jobs=-1, class_weight="balanced",
         ),
         "XGBoost": XGBClassifier(
-            n_estimators=200, learning_rate=0.1, random_state=42,
-            scale_pos_weight=scale_ratio,
+            n_estimators=500, learning_rate=0.1, random_state=42,
+            scale_pos_weight=scale_ratio, early_stopping_rounds=20,
         ),
     }
 
     results = []
     for name, model in models.items():
         print(f"Training {name}...")
-        model.fit(X_train, y_train)
-        y_pred = model.predict(X_test)
+        if name == "XGBoost":
+            model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
+        else:
+            model.fit(X_train, y_train)
+
+        # Tune threshold on validation set
+        best_thresh = _find_best_threshold(model, X_val, y_val)
+        print(f"  Optimal threshold: {best_thresh:.2f}")
+
+        # Predict on test with tuned threshold
+        if hasattr(model, "predict_proba") and best_thresh != 0.5:
+            y_proba = model.predict_proba(X_test)[:, 1]
+            y_pred = (y_proba >= best_thresh).astype(int)
+        else:
+            y_pred = model.predict(X_test)
+
         metrics = classification_metrics(y_test, y_pred, label=name)
         metrics["model_obj"] = model
         metrics["y_test"] = y_test
