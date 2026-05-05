@@ -2,6 +2,7 @@
 
 import numpy as np
 import pandas as pd
+import holidays as hol
 
 
 def add_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -31,7 +32,7 @@ def add_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
 def add_lag_features(df: pd.DataFrame, target: str = "departures") -> pd.DataFrame:
     """Add lag features: t-1h, t-2h, t-3h, t-24h, t-168h."""
     df = df.sort_values(["station_id", "hour"]).copy()
-    for lag in [1, 2, 3, 12, 24, 48, 168]:
+    for lag in [1, 2, 3, 12, 24, 48, 168, 336, 672]:
         col = f"{target}_lag_{lag}h"
         df[col] = df.groupby("station_id")[target].shift(lag)
     # Also lag dock-level features for risk classification
@@ -61,6 +62,24 @@ def add_trend_features(df: pd.DataFrame, target: str = "departures") -> pd.DataF
     """Add lagged difference (t-1 minus t-2) to avoid leakage."""
     df = df.sort_values(["station_id", "hour"]).copy()
     df[f"{target}_diff_1h"] = df.groupby("station_id")[target].diff(1).shift(1)
+    return df
+
+
+def add_holiday_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Add US NY-state holiday flags: is_holiday, is_day_before_holiday, is_day_after_holiday."""
+    df = df.copy()
+    years = df["hour"].dt.year.unique()
+    ny_holidays = hol.US(state="NY", years=sorted(years))
+    holiday_dates = set(ny_holidays.keys())
+
+    dates = df["hour"].dt.date
+    df["is_holiday"] = dates.isin(holiday_dates).astype(int)
+    df["is_day_before_holiday"] = dates.map(
+        lambda d: (d + pd.Timedelta(days=1)) in holiday_dates
+    ).astype(int)
+    df["is_day_after_holiday"] = dates.map(
+        lambda d: (d - pd.Timedelta(days=1)) in holiday_dates
+    ).astype(int)
     return df
 
 
@@ -153,6 +172,9 @@ def build_features(hourly: pd.DataFrame, target: str = "departures") -> pd.DataF
     """
     print("Adding temporal features...")
     df = add_temporal_features(hourly)
+
+    print("Adding holiday features...")
+    df = add_holiday_features(df)
 
     print("Adding lag features...")
     df = add_lag_features(df, target=target)

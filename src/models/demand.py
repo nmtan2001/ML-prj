@@ -7,6 +7,7 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
 from sklearn.preprocessing import StandardScaler
 from xgboost import XGBRegressor
+from lightgbm import LGBMRegressor
 from skforecast.recursive import ForecasterRecursiveMultiSeries
 from skforecast.model_selection import TimeSeriesFold, grid_search_forecaster_multiseries
 
@@ -32,9 +33,10 @@ FEATURE_COLS_DEMAND = [
     "hour_of_day", "day_of_week", "is_weekend", "is_rush_hour",
     "hour_sin", "hour_cos", "dow_sin", "dow_cos",
     "weekend_x_hour", "rush_x_weekend",
+    "is_holiday", "is_day_before_holiday", "is_day_after_holiday",
     "departures_lag_1h", "departures_lag_2h", "departures_lag_3h",
     "departures_lag_12h", "departures_lag_24h", "departures_lag_48h",
-    "departures_lag_168h",
+    "departures_lag_168h", "departures_lag_336h", "departures_lag_672h",
     "departures_roll_mean_3h", "departures_roll_mean_6h",
     "departures_roll_mean_12h", "departures_roll_mean_24h",
     "departures_roll_std_3h", "departures_roll_std_6h",
@@ -97,9 +99,9 @@ def train_demand_models(df: pd.DataFrame, target: str = "departures") -> list[di
     print("Training RandomForest (GridSearchCV)...")
     rf = RandomForestRegressor(random_state=42, n_jobs=-1)
     rf_grid = {
-        "n_estimators": [100, 300],
-        "max_depth": [10, 20, None],
-        "min_samples_leaf": [1, 5],
+        "n_estimators": [100, 200],
+        "max_depth": [15, 25],
+        "min_samples_leaf": [5],
     }
     rf_search = GridSearchCV(rf, rf_grid, cv=tscv, scoring="neg_mean_absolute_error", verbose=0)
     rf_search.fit(X_trainval, y_trainval)
@@ -113,8 +115,8 @@ def train_demand_models(df: pd.DataFrame, target: str = "departures") -> list[di
     print("Training XGBoost (GridSearchCV)...")
     xgb = XGBRegressor(random_state=42, n_jobs=-1, early_stopping_rounds=20)
     xgb_grid = {
-        "n_estimators": [200, 500],
-        "max_depth": [3, 6, 10],
+        "n_estimators": [200, 400],
+        "max_depth": [3, 6],
         "learning_rate": [0.05, 0.1],
     }
     xgb_search = GridSearchCV(
@@ -127,39 +129,65 @@ def train_demand_models(df: pd.DataFrame, target: str = "departures") -> list[di
     metrics["model_obj"] = xgb_search.best_estimator_
     results.append(metrics)
 
+    # LightGBM with GridSearchCV
+    print("Training LightGBM (GridSearchCV)...")
+    lgbm = LGBMRegressor(random_state=42, n_jobs=-1, verbose=-1)
+    lgbm_grid = {
+        "n_estimators": [200, 400],
+        "max_depth": [3, 6, -1],
+        "learning_rate": [0.05, 0.1],
+    }
+    lgbm_search = GridSearchCV(
+        lgbm, lgbm_grid, cv=tscv, scoring="neg_mean_absolute_error", verbose=0,
+    )
+    lgbm_search.fit(X_trainval, y_trainval)
+    print(f"  Best params: {lgbm_search.best_params_}")
+    y_pred = lgbm_search.predict(X_test)
+    metrics = regression_metrics(y_test, y_pred, label="LightGBM")
+    metrics["model_obj"] = lgbm_search.best_estimator_
+    results.append(metrics)
+
     return results
 
 
 def train_skforecast_model(df: pd.DataFrame, target: str = "departures") -> dict:
     """Train a skforecast ForecasterRecursiveMultiSeries with grid search.
 
-    Uses grid_search_forecaster_multiseries with TimeSeriesFold to find
-    optimal lags and hyperparameters, then evaluates on test set.
-    Uses a reduced exog set and compact grid to keep runtime manageable.
+    Uses per-station exog dicts with station-specific encoding features.
+    Compact grid (2 lags x 4 params) to keep runtime manageable.
     """
     train, val, test = time_split(df)
     fit_data = pd.concat([train, val])
 
-    # Subset of exogenous features to avoid excessive dimensionality
-    exog_subset = [
+    # Exog features: calendar + weather + station-specific encoding + holiday
+    shared_exog_cols = [
         "hour_of_day", "day_of_week", "is_weekend", "is_rush_hour",
         "hour_sin", "hour_cos", "dow_sin", "dow_cos",
         "temperature", "precipitation", "wind_speed",
+        "is_holiday", "is_day_before_holiday", "is_day_after_holiday",
     ]
-    exog_cols = [c for c in exog_subset if c in df.columns]
+    station_exog_cols = [
+        "station_mean_demand", "station_hour_mean", "station_weekend_ratio",
+    ]
+    all_exog = [c for c in shared_exog_cols + station_exog_cols if c in df.columns]
 
     # Build series with datetime index and frequency
     fit_series = fit_data.pivot(index="hour", columns="station_id", values=target).asfreq("h").ffill()
     test_series = test.pivot(index="hour", columns="station_id", values=target).asfreq("h").ffill()
 
-    # Build shared exog DataFrame (same temporal index for all stations)
-    # Use first station to get the time-indexed exog values (they are calendar features)
-    sample_station = fit_data[fit_data["station_id"] == fit_series.columns[0]]
-    fit_exog = sample_station.set_index("hour")[exog_cols].reindex(fit_series.index).ffill()
-    test_exog_sample = test[test["station_id"] == fit_series.columns[0]]
-    test_exog = test_exog_sample.set_index("hour")[exog_cols].reindex(test_series.index).ffill()
+    # Build per-station exog dicts
+    def _build_exog_dict(data, series_index):
+        exog_dict = {}
+        for sid in series_index.columns:
+            st = data[data["station_id"] == sid].set_index("hour")
+            exog_df = st[all_exog].reindex(series_index.index).ffill().bfill()
+            exog_dict[sid] = exog_df
+        return exog_dict
 
-    # Grid search for best lags and hyperparameters
+    fit_exog = _build_exog_dict(fit_data, fit_series)
+    test_exog = _build_exog_dict(test, test_series)
+
+    # Grid search
     print("Grid search for skforecast ForecasterRecursiveMultiSeries...")
     forecaster = ForecasterRecursiveMultiSeries(
         estimator=XGBRegressor(random_state=42, n_jobs=-1),

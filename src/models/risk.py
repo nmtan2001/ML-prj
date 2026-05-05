@@ -9,6 +9,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
 from sklearn.metrics import f1_score, make_scorer
 from xgboost import XGBClassifier
+from lightgbm import LGBMClassifier
 
 from src.evaluate import classification_metrics
 
@@ -17,9 +18,10 @@ FEATURE_COLS_RISK = [
     "hour_of_day", "day_of_week", "is_weekend", "is_rush_hour",
     "hour_sin", "hour_cos", "dow_sin", "dow_cos",
     "weekend_x_hour", "rush_x_weekend",
+    "is_holiday", "is_day_before_holiday", "is_day_after_holiday",
     "departures_lag_1h", "departures_lag_2h", "departures_lag_3h",
     "departures_lag_12h", "departures_lag_24h", "departures_lag_48h",
-    "departures_lag_168h",
+    "departures_lag_168h", "departures_lag_336h", "departures_lag_672h",
     "departures_roll_mean_3h", "departures_roll_mean_6h",
     "departures_roll_mean_12h", "departures_roll_mean_24h",
     "departures_roll_std_3h", "departures_roll_std_6h",
@@ -112,12 +114,26 @@ def train_risk_models(df: pd.DataFrame, target: str = "is_high_risk") -> list[di
     xgb_search.fit(X_trainval, y_trainval, eval_set=[(X_val, y_val)], verbose=False)
     print(f"  Best params: {xgb_search.best_params_}")
 
+    # LightGBM GridSearchCV
+    print("Training LightGBM (GridSearchCV)...")
+    lgbm = LGBMClassifier(random_state=42, n_jobs=-1, verbose=-1,
+                           scale_pos_weight=scale_ratio)
+    lgbm_grid = {
+        "n_estimators": [200, 500],
+        "max_depth": [3, 6, 10, -1],
+        "learning_rate": [0.05, 0.1],
+    }
+    lgbm_search = GridSearchCV(lgbm, lgbm_grid, cv=tscv, scoring=f1_scorer, verbose=0)
+    lgbm_search.fit(X_trainval, y_trainval)
+    print(f"  Best params: {lgbm_search.best_params_}")
+
     # Evaluate all with threshold tuning
     results = []
     for name, search in [
         ("LogisticRegression", lr_search),
         ("RandomForest", rf_search),
         ("XGBoost", xgb_search),
+        ("LightGBM", lgbm_search),
     ]:
         model = search.best_estimator_
 

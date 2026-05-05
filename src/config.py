@@ -7,8 +7,11 @@ DATA_PROCESSED = PROJECT_ROOT / "data" / "processed"
 # Citi Bike S3 base URL for trip data
 CITIBIKE_S3_BASE = "https://s3.amazonaws.com/tripdata"
 
-# Months to download (YYYYMM format)
-MONTHS = ["202601", "202602", "202603"]
+# Months to download (YYYYMM format) -- Apr 2025 through Mar 2026
+MONTHS = [
+    "202504", "202505", "202506", "202507", "202508", "202509",
+    "202510", "202511", "202512", "202601", "202602", "202603",
+]
 
 # Station selection: bounding box for Manhattan below Central Park
 STATION_BOUNDS = {
@@ -22,7 +25,7 @@ STATION_BOUNDS = {
 MIN_TRIPS_THRESHOLD = 1000
 
 # Max number of top stations to keep (by trip count)
-MAX_STATIONS = 30
+MAX_STATIONS = 50
 
 # Train/val/test split ratios (chronological)
 TRAIN_RATIO = 0.70

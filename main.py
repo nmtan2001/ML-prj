@@ -10,6 +10,7 @@ from simulate_docks import label_risk, simulate_inventory
 from features import build_features
 from models.demand import train_demand_models
 from models.risk import train_risk_models
+from models.ensemble import train_ensemble
 from models.prioritize import compute_priority_score
 from evaluate import plot_model_comparison
 import matplotlib.pyplot as plt
@@ -59,6 +60,13 @@ def main():
     sk_result = train_skforecast_model(df, target="departures")
     demand_results.append(sk_result)
 
+    # Ensemble blending
+    ensemble_result = train_ensemble(demand_results, df, target="departures")
+    if ensemble_result is not None:
+        demand_results.append(ensemble_result)
+        print(f"  {'Ensemble-Blend':20s} MAE={ensemble_result['MAE']:.4f}  "
+              f"RMSE={ensemble_result['RMSE']:.4f}  MAPE={ensemble_result['MAPE']:.1f}%")
+
     # Step 5: Task 2 - Risk classification
     print("\n" + "=" * 60)
     print("STEP 5: Task 2 - Risk classification")
@@ -82,9 +90,10 @@ def main():
     from models.demand import time_split, FEATURE_COLS_DEMAND
     _, _, test_df = time_split(df)
 
-    # Use best demand model predictions
+    # Use best demand model predictions (exclude baselines, ensemble, skforecast)
+    _task3_excluded = {"Naive", "HistAvg", "Ensemble-Blend", "skforecast-MultiSeries"}
     best_demand = min(
-        [r for r in demand_results if r["model"] not in ("Naive", "HistAvg")],
+        [r for r in demand_results if r["model"] not in _task3_excluded],
         key=lambda r: r["MAE"],
     )
     avail = [c for c in FEATURE_COLS_DEMAND if c in test_df.columns]

@@ -49,6 +49,7 @@ def fetch_weather(start_date: str, end_date: str) -> pd.DataFrame:
 def fetch_and_cache_weather(start_date: str, end_date: str, cache_path=None) -> pd.DataFrame:
     """
     Fetch weather data with parquet caching.
+    Validates cached date range covers requested range; re-fetches if stale.
     """
     from src.config import DATA_PROCESSED
 
@@ -56,8 +57,16 @@ def fetch_and_cache_weather(start_date: str, end_date: str, cache_path=None) -> 
         cache_path = DATA_PROCESSED / "weather.parquet"
 
     if cache_path.exists():
-        print(f"Loading cached weather data from {cache_path}")
-        return pd.read_parquet(cache_path)
+        cached = pd.read_parquet(cache_path)
+        cached_start = pd.to_datetime(cached["hour"].min())
+        cached_end = pd.to_datetime(cached["hour"].max())
+        req_start = pd.to_datetime(start_date)
+        req_end = pd.to_datetime(end_date)
+        if cached_start <= req_start and cached_end >= req_end:
+            print(f"Loading cached weather data from {cache_path}")
+            return cached
+        print(f"Cached weather range [{cached_start.date()}, {cached_end.date()}] "
+              f"does not cover [{req_start.date()}, {req_end.date()}]. Re-fetching.")
 
     print(f"Fetching weather data from Open-Meteo ({start_date} to {end_date})...")
     df = fetch_weather(start_date, end_date)
@@ -69,6 +78,6 @@ def fetch_and_cache_weather(start_date: str, end_date: str, cache_path=None) -> 
 
 
 if __name__ == "__main__":
-    df = fetch_and_cache_weather("2026-01-01", "2026-03-31")
+    df = fetch_and_cache_weather("2025-04-01", "2026-03-31")
     print(df.head())
     print(df.describe())
