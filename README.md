@@ -12,17 +12,20 @@ Predict hourly station-level demand, classify risk of dock overflow/emptiness, a
 
 ## Results
 
-| Model | MAE | RMSE | R2 |
-|-------|-----|------|----|
-| skforecast-MultiSeries | 3.67 | 5.64 | - |
-| XGBoost | 3.96 | 6.53 | - |
-| RandomForest | 4.09 | 6.74 | - |
+| Model | MAE | RMSE | MAPE |
+|-------|-----|------|------|
+| XGBoost | 3.56 | 5.38 | 42.5% |
+| RandomForest | 3.65 | 5.61 | 43.4% |
+| Ridge | 4.39 | 6.93 | 60.2% |
+| skforecast-MultiSeries | 4.76 | 7.37 | -- |
+| Naive | 5.65 | 8.93 | 67.7% |
+| HistAvg | 7.14 | 11.34 | 56.9% |
 
 | Model | Accuracy | F1 | Precision | Recall |
 |-------|----------|-----|-----------|--------|
-| RandomForest | 0.888 | 0.590 | 0.595 | 0.586 |
-| XGBoost | 0.872 | 0.577 | 0.529 | 0.635 |
-| LogisticRegression | 0.777 | 0.429 | 0.330 | 0.610 |
+| XGBoost | 0.881 | 0.609 | 0.554 | 0.677 |
+| RandomForest | 0.894 | 0.602 | 0.622 | 0.583 |
+| LogisticRegression | 0.819 | 0.448 | 0.385 | 0.535 |
 
 ## Project Structure
 

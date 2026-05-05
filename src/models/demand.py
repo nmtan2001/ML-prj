@@ -4,9 +4,11 @@ import numpy as np
 import pandas as pd
 from sklearn.linear_model import Ridge
 from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
 from sklearn.preprocessing import StandardScaler
 from xgboost import XGBRegressor
 from skforecast.recursive import ForecasterRecursiveMultiSeries
+from skforecast.model_selection import TimeSeriesFold, grid_search_forecaster_multiseries
 
 from src.evaluate import regression_metrics
 
@@ -47,9 +49,10 @@ FEATURE_COLS_DEMAND = [
 
 
 def train_demand_models(df: pd.DataFrame, target: str = "departures") -> list[dict]:
-    """Train and evaluate multiple demand forecasting models.
+    """Train and evaluate demand forecasting models with GridSearchCV.
 
-    Uses global timestamp split. XGBoost uses early stopping on validation set.
+    Uses global timestamp split. GridSearchCV with TimeSeriesSplit for
+    hyperparameter tuning on RF and XGBoost.
     Returns list of result dicts with metrics and trained model objects.
     """
     available_features = [c for c in FEATURE_COLS_DEMAND if c in df.columns]
@@ -59,90 +62,141 @@ def train_demand_models(df: pd.DataFrame, target: str = "departures") -> list[di
     X_val, y_val = val[available_features], val[target]
     X_test, y_test = test[available_features], test[target]
 
-    models = {
-        "Ridge": Ridge(alpha=1.0),
-        "RandomForest": RandomForestRegressor(n_estimators=300, random_state=42, n_jobs=-1),
-        "XGBoost": XGBRegressor(
-            n_estimators=500, learning_rate=0.1, random_state=42, n_jobs=-1,
-            early_stopping_rounds=20,
-        ),
-    }
+    # Combine train+val for GridSearchCV (CV splits internally)
+    X_trainval = pd.concat([X_train, X_val])
+    y_trainval = pd.concat([y_train, y_val])
+    tscv = TimeSeriesSplit(n_splits=3)
 
     results = []
 
-    # Naive baseline: use per-station lag-1 from test set
+    # Naive baseline
     test_sorted = test.sort_values(["station_id", "hour"])
     y_pred_naive = test_sorted.groupby("station_id")[target].shift(1).fillna(0)
     results.append(regression_metrics(y_test, y_pred_naive, label="Naive"))
 
-    # Historical average by station and hour
+    # Historical average
     avg = train.groupby(["station_id", "hour_of_day"])[target].mean()
     y_pred_avg = test.apply(
         lambda r: avg.get((r["station_id"], r["hour_of_day"]), y_train.mean()), axis=1
     )
     results.append(regression_metrics(y_test, y_pred_avg, label="HistAvg"))
 
-    for name, model in models.items():
-        print(f"Training {name}...")
-        if name == "XGBoost":
-            model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
-        else:
-            model.fit(X_train, y_train)
-        y_pred = model.predict(X_test)
-        metrics = regression_metrics(y_test, y_pred, label=name)
-        metrics["model_obj"] = model
-        results.append(metrics)
+    # Ridge
+    print("Training Ridge...")
+    ridge = Ridge()
+    ridge_grid = {"alpha": [0.1, 1.0, 10.0, 100.0]}
+    ridge_search = GridSearchCV(ridge, ridge_grid, cv=tscv, scoring="neg_mean_absolute_error")
+    ridge_search.fit(X_trainval, y_trainval)
+    print(f"  Best params: {ridge_search.best_params_}")
+    y_pred = ridge_search.predict(X_test)
+    metrics = regression_metrics(y_test, y_pred, label="Ridge")
+    metrics["model_obj"] = ridge_search.best_estimator_
+    results.append(metrics)
+
+    # RandomForest with GridSearchCV
+    print("Training RandomForest (GridSearchCV)...")
+    rf = RandomForestRegressor(random_state=42, n_jobs=-1)
+    rf_grid = {
+        "n_estimators": [100, 300],
+        "max_depth": [10, 20, None],
+        "min_samples_leaf": [1, 5],
+    }
+    rf_search = GridSearchCV(rf, rf_grid, cv=tscv, scoring="neg_mean_absolute_error", verbose=0)
+    rf_search.fit(X_trainval, y_trainval)
+    print(f"  Best params: {rf_search.best_params_}")
+    y_pred = rf_search.predict(X_test)
+    metrics = regression_metrics(y_test, y_pred, label="RandomForest")
+    metrics["model_obj"] = rf_search.best_estimator_
+    results.append(metrics)
+
+    # XGBoost with GridSearchCV + early stopping
+    print("Training XGBoost (GridSearchCV)...")
+    xgb = XGBRegressor(random_state=42, n_jobs=-1, early_stopping_rounds=20)
+    xgb_grid = {
+        "n_estimators": [200, 500],
+        "max_depth": [3, 6, 10],
+        "learning_rate": [0.05, 0.1],
+    }
+    xgb_search = GridSearchCV(
+        xgb, xgb_grid, cv=tscv, scoring="neg_mean_absolute_error", verbose=0,
+    )
+    xgb_search.fit(X_trainval, y_trainval, eval_set=[(X_val, y_val)], verbose=False)
+    print(f"  Best params: {xgb_search.best_params_}")
+    y_pred = xgb_search.predict(X_test)
+    metrics = regression_metrics(y_test, y_pred, label="XGBoost")
+    metrics["model_obj"] = xgb_search.best_estimator_
+    results.append(metrics)
 
     return results
 
 
 def train_skforecast_model(df: pd.DataFrame, target: str = "departures") -> dict:
-    """Train a skforecast ForecasterRecursiveMultiSeries model.
+    """Train a skforecast ForecasterRecursiveMultiSeries with grid search.
 
-    Fits on train+val to predict the test period. Uses per-station exogenous
-    features via dict format, which preserves station-level variation.
+    Uses grid_search_forecaster_multiseries with TimeSeriesFold to find
+    optimal lags and hyperparameters, then evaluates on test set.
+    Uses a reduced exog set and compact grid to keep runtime manageable.
     """
     train, val, test = time_split(df)
     fit_data = pd.concat([train, val])
 
-    available_features = [c for c in FEATURE_COLS_DEMAND if c in df.columns]
-    exog_cols = [c for c in available_features if c not in ("latitude", "longitude")]
+    # Subset of exogenous features to avoid excessive dimensionality
+    exog_subset = [
+        "hour_of_day", "day_of_week", "is_weekend", "is_rush_hour",
+        "hour_sin", "hour_cos", "dow_sin", "dow_cos",
+        "temperature", "precipitation", "wind_speed",
+    ]
+    exog_cols = [c for c in exog_subset if c in df.columns]
 
-    # Build series: DataFrame with datetime index and frequency
-    fit_series = fit_data.pivot(index="hour", columns="station_id", values=target)
-    fit_series = fit_series.asfreq("h").ffill()
-    test_series = test.pivot(index="hour", columns="station_id", values=target)
-    test_series = test_series.asfreq("h").ffill()
+    # Build series with datetime index and frequency
+    fit_series = fit_data.pivot(index="hour", columns="station_id", values=target).asfreq("h").ffill()
+    test_series = test.pivot(index="hour", columns="station_id", values=target).asfreq("h").ffill()
 
-    # Build per-station exog dicts
-    fit_exog_dict = {}
-    test_exog_dict = {}
-    for sid in fit_series.columns:
-        station_fit = fit_data[fit_data["station_id"] == sid].set_index("hour")[exog_cols]
-        station_test = test[test["station_id"] == sid].set_index("hour")[exog_cols]
-        if len(station_fit) > 0:
-            fit_exog_dict[sid] = station_fit
-        if len(station_test) > 0:
-            test_exog_dict[sid] = station_test
+    # Build shared exog DataFrame (same temporal index for all stations)
+    # Use first station to get the time-indexed exog values (they are calendar features)
+    sample_station = fit_data[fit_data["station_id"] == fit_series.columns[0]]
+    fit_exog = sample_station.set_index("hour")[exog_cols].reindex(fit_series.index).ffill()
+    test_exog_sample = test[test["station_id"] == fit_series.columns[0]]
+    test_exog = test_exog_sample.set_index("hour")[exog_cols].reindex(test_series.index).ffill()
 
-    print("Training skforecast ForecasterRecursiveMultiSeries...")
+    # Grid search for best lags and hyperparameters
+    print("Grid search for skforecast ForecasterRecursiveMultiSeries...")
     forecaster = ForecasterRecursiveMultiSeries(
-        estimator=XGBRegressor(n_estimators=200, learning_rate=0.1, random_state=42, n_jobs=-1),
-        lags=[1, 2, 3, 24, 168],
+        estimator=XGBRegressor(random_state=42, n_jobs=-1),
+        lags=5,
         transformer_series=StandardScaler(),
         transformer_exog=StandardScaler(),
     )
-    forecaster.fit(
-        series=fit_series, exog=fit_exog_dict, suppress_warnings=True,
-    )
 
-    # Predict test period
+    lags_grid = [[1, 2, 3, 24], [1, 2, 3, 24, 168]]
+    param_grid = {
+        "n_estimators": [100, 200],
+        "max_depth": [3, 6],
+    }
+
+    cv = TimeSeriesFold(initial_train_size=int(len(fit_series) * 0.85), steps=24, refit=False)
+
+    grid_results = grid_search_forecaster_multiseries(
+        forecaster=forecaster,
+        series=fit_series,
+        exog=fit_exog,
+        lags_grid=lags_grid,
+        param_grid=param_grid,
+        metric="mean_absolute_error",
+        cv=cv,
+        return_best=True,
+        suppress_warnings=True,
+        show_progress=True,
+    )
+    print(f"  Best lags: {forecaster.lags}")
+    print(f"  Best params: {grid_results.iloc[0]['params']}")
+
+    # Predict test period with best forecaster
     steps = len(test_series)
     y_pred = forecaster.predict(
-        steps=steps, exog=test_exog_dict, suppress_warnings=True,
+        steps=steps, exog=test_exog, suppress_warnings=True,
     )
 
-    # y_pred is long-format: columns = ['level', 'pred']
     pred_wide = y_pred.pivot(columns="level", values="pred")
     common_cols = list(set(pred_wide.columns) & set(test_series.columns))
     pred_aligned = pred_wide[common_cols].sort_index(axis=1)

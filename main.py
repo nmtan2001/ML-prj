@@ -75,14 +75,29 @@ def main():
     )
     fig_cm.savefig("output_risk_confusion.png", dpi=150, bbox_inches="tight")
 
-    # Step 6: Task 3 - Capacity prioritization
+    # Step 6: Task 3 - Capacity prioritization (using model predictions)
     print("\n" + "=" * 60)
     print("STEP 6: Task 3 - Capacity prioritization")
     print("=" * 60)
-    summary = df.groupby("station_id").agg(
-        predicted_demand=("departures", "mean"),
-        risk_frequency=("is_high_risk", "mean"),
-        avg_daily_demand=("departures", lambda x: x.sum() / df.loc[x.index, "hour"].dt.date.nunique()),
+    from models.demand import time_split, FEATURE_COLS_DEMAND
+    _, _, test_df = time_split(df)
+
+    # Use best demand model predictions
+    best_demand = min(
+        [r for r in demand_results if r["model"] not in ("Naive", "HistAvg")],
+        key=lambda r: r["MAE"],
+    )
+    avail = [c for c in FEATURE_COLS_DEMAND if c in test_df.columns]
+    test_df["predicted_departures"] = best_demand["model_obj"].predict(test_df[avail])
+
+    # Use best risk model predictions
+    best_risk_model = max(risk_results, key=lambda r: r["F1"])
+    test_df["predicted_risk"] = best_risk_model["y_pred"]
+
+    summary = test_df.groupby("station_id").agg(
+        predicted_demand=("predicted_departures", "mean"),
+        risk_frequency=("predicted_risk", "mean"),
+        avg_daily_demand=("predicted_departures", lambda x: x.sum() / test_df.loc[x.index, "hour"].dt.date.nunique()),
     ).reset_index()
     ranked = compute_priority_score(summary)
     print(ranked[["station_id", "priority_score"]].head(10))
