@@ -14,13 +14,12 @@ from lightgbm import LGBMClassifier
 from src.evaluate import classification_metrics
 
 
-def _focal_loss_xgb(preds, dtrain, gamma=2.0, alpha=0.25):
+def _focal_loss_xgb(labels, preds, gamma=2.0, alpha=0.25):
     """Custom XGBoost objective: focal loss for binary classification.
 
     FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t)
     Down-weights well-classified examples to focus on hard minority class.
     """
-    labels = dtrain.get_label()
     preds = 1.0 / (1.0 + np.exp(-preds))  # sigmoid
     eps = 1e-7
     preds = np.clip(preds, eps, 1 - eps)
