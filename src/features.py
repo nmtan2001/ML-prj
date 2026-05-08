@@ -5,6 +5,7 @@ import pandas as pd
 import holidays as hol
 from sklearn.neighbors import NearestNeighbors
 from sklearn.cluster import KMeans
+from sklearn.ensemble import IsolationForest
 
 
 def add_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -27,6 +28,23 @@ def add_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
     df["dow_cos"] = np.cos(2 * np.pi * df["day_of_week"] / 7)
     df["month_sin"] = np.sin(2 * np.pi * df["month"] / 12)
     df["month_cos"] = np.cos(2 * np.pi * df["month"] / 12)
+
+    # Fourier terms for multiple seasonalities
+    # 24h period: harmonics 1-3
+    for k in [1, 2, 3]:
+        df[f"fourier_24h_sin_{k}"] = np.sin(2 * np.pi * k * df["hour_of_day"] / 24)
+        df[f"fourier_24h_cos_{k}"] = np.cos(2 * np.pi * k * df["hour_of_day"] / 24)
+    # 168h period (weekly): harmonics 1-2
+    hour_of_week = df["day_of_week"] * 24 + df["hour_of_day"]
+    for k in [1, 2]:
+        df[f"fourier_168h_sin_{k}"] = np.sin(2 * np.pi * k * hour_of_week / 168)
+        df[f"fourier_168h_cos_{k}"] = np.cos(2 * np.pi * k * hour_of_week / 168)
+    # 8766h period (yearly): harmonic 1
+    hour_of_year = (df["hour"] - df["hour"].dt.normalize()).dt.total_seconds() / 3600
+    day_of_year = df["hour"].dt.dayofyear
+    hours_since_year_start = (day_of_year - 1) * 24 + df["hour_of_day"]
+    df["fourier_yearly_sin_1"] = np.sin(2 * np.pi * hours_since_year_start / 8766)
+    df["fourier_yearly_cos_1"] = np.cos(2 * np.pi * hours_since_year_start / 8766)
 
     # Key interactions
     df["weekend_x_hour"] = df["is_weekend"] * df["hour_of_day"]
@@ -282,6 +300,28 @@ def add_spatial_lag_features(
     return df
 
 
+def add_anomaly_features(df: pd.DataFrame, target: str = "departures") -> pd.DataFrame:
+    """Add Isolation Forest anomaly score per station based on recent demand patterns.
+
+    Computed on training period only to avoid leakage.
+    """
+    df = df.copy()
+    timestamps = df["hour"].sort_values().unique()
+    cutoff = timestamps[int(len(timestamps) * 0.70)]
+    train_df = df[df["hour"] < cutoff]
+
+    # Per-station anomaly model using lag + rolling features
+    feature_cols = [f"{target}_lag_1h", f"{target}_lag_24h", f"{target}_roll_mean_3h",
+                    f"{target}_roll_std_3h", f"{target}_diff_1h"]
+    avail = [c for c in feature_cols if c in df.columns]
+
+    iso = IsolationForest(contamination=0.05, random_state=42, n_jobs=-1)
+    iso.fit(train_df[avail].dropna())
+    df["anomaly_score"] = iso.decision_function(df[avail].fillna(0))
+
+    return df
+
+
 def build_features(hourly: pd.DataFrame, target: str = "departures") -> pd.DataFrame:
     """
     Run full feature engineering pipeline.
@@ -312,6 +352,9 @@ def build_features(hourly: pd.DataFrame, target: str = "departures") -> pd.DataF
 
     print("Adding KNN spatial lag features...")
     df = add_spatial_lag_features(df, target=target)
+
+    print("Adding anomaly features...")
+    df = add_anomaly_features(df, target=target)
 
     print("Adding weather features...")
     df = add_weather_features(df)
