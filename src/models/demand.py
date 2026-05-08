@@ -13,8 +13,6 @@ from skforecast.recursive import ForecasterRecursiveMultiSeries
 from skforecast.model_selection import TimeSeriesFold, grid_search_forecaster_multiseries
 
 from src.evaluate import regression_metrics
-import optuna
-from lightgbm import early_stopping as lgbm_early_stopping
 
 
 def time_split(df: pd.DataFrame):
@@ -81,36 +79,6 @@ FEATURE_COLS_DEMAND = [
     "anomaly_score",
 ]
 
-# Feature subsets for ensemble diversity
-_FEATURE_LAGS = [
-    "departures_lag_1h", "departures_lag_2h", "departures_lag_3h",
-    "departures_lag_12h", "departures_lag_24h", "departures_lag_48h",
-    "departures_lag_168h", "departures_lag_336h", "departures_lag_672h",
-    "departures_roll_mean_3h", "departures_roll_mean_6h",
-    "departures_roll_mean_12h", "departures_roll_mean_24h",
-    "departures_roll_std_3h", "departures_roll_std_6h",
-    "departures_roll_std_12h", "departures_roll_std_24h",
-    "departures_diff_1h",
-    "departures_same_hour_roll_mean_3d", "departures_same_hour_roll_mean_7d",
-]
-
-_FEATURE_CALENDAR_WEATHER = [
-    "hour_of_day", "day_of_week", "month", "is_weekend", "is_rush_hour",
-    "is_daylight",
-    "hour_sin", "hour_cos", "dow_sin", "dow_cos", "month_sin", "month_cos",
-    "fourier_24h_sin_1", "fourier_24h_cos_1", "fourier_24h_sin_2", "fourier_24h_cos_2",
-    "fourier_24h_sin_3", "fourier_24h_cos_3",
-    "fourier_168h_sin_1", "fourier_168h_cos_1", "fourier_168h_sin_2", "fourier_168h_cos_2",
-    "fourier_yearly_sin_1", "fourier_yearly_cos_1",
-    "weekend_x_hour", "rush_x_weekend",
-    "is_holiday", "is_day_before_holiday", "is_day_after_holiday",
-    "temperature", "humidity", "precipitation", "wind_speed",
-    "is_precipitating", "precip_roll_sum_3h", "precip_roll_sum_6h",
-    "apparent_temp",
-    "precipitation_x_weekend", "precipitation_x_rush",
-    "temp_x_hour_sin", "temp_x_humidity",
-]
-
 
 def train_demand_models(df: pd.DataFrame, target: str = "departures") -> list[dict]:
     """Train and evaluate demand forecasting models with GridSearchCV.
@@ -125,10 +93,6 @@ def train_demand_models(df: pd.DataFrame, target: str = "departures") -> list[di
     X_train, y_train = train[available_features], train[target]
     X_val, y_val = val[available_features], val[target]
     X_test, y_test = test[available_features], test[target]
-
-    # Feature subsets for diversity (lag-heavy vs calendar+weather-heavy)
-    avail_lags = [c for c in _FEATURE_LAGS if c in df.columns]
-    avail_cal_weather = [c for c in _FEATURE_CALENDAR_WEATHER if c in df.columns]
 
     # Combine train+val for GridSearchCV (CV splits internally)
     X_trainval = pd.concat([X_train, X_val])
@@ -161,8 +125,8 @@ def train_demand_models(df: pd.DataFrame, target: str = "departures") -> list[di
     metrics["model_obj"] = ridge_search.best_estimator_
     results.append(metrics)
 
-    # RandomForest with GridSearchCV (calendar+weather features for diversity)
-    print("Training RandomForest (GridSearchCV, calendar+weather features)...")
+    # RandomForest with GridSearchCV
+    print("Training RandomForest (GridSearchCV)...")
     rf = RandomForestRegressor(random_state=42, n_jobs=-1)
     rf_grid = {
         "n_estimators": [100, 200],
@@ -170,16 +134,15 @@ def train_demand_models(df: pd.DataFrame, target: str = "departures") -> list[di
         "min_samples_leaf": [5],
     }
     rf_search = GridSearchCV(rf, rf_grid, cv=tscv, scoring="neg_mean_absolute_error", verbose=0)
-    rf_search.fit(X_trainval[avail_cal_weather], y_trainval)
+    rf_search.fit(X_trainval, y_trainval)
     print(f"  Best params: {rf_search.best_params_}")
-    y_pred = rf_search.predict(X_test[avail_cal_weather])
+    y_pred = rf_search.predict(X_test)
     metrics = regression_metrics(y_test, y_pred, label="RandomForest")
     metrics["model_obj"] = rf_search.best_estimator_
-    metrics["feature_subset"] = avail_cal_weather
     results.append(metrics)
 
-    # XGBoost with GridSearchCV + early stopping (lag features for diversity)
-    print("Training XGBoost (GridSearchCV, lag features)...")
+    # XGBoost with GridSearchCV + early stopping
+    print("Training XGBoost (GridSearchCV)...")
     xgb = XGBRegressor(
         random_state=42, n_jobs=-1, early_stopping_rounds=20,
         objective="reg:tweedie", tweedie_variance_power=1.5,
@@ -192,71 +155,32 @@ def train_demand_models(df: pd.DataFrame, target: str = "departures") -> list[di
     xgb_search = GridSearchCV(
         xgb, xgb_grid, cv=tscv, scoring="neg_mean_absolute_error", verbose=0,
     )
-    xgb_search.fit(X_trainval[avail_lags], y_trainval, eval_set=[(X_val[avail_lags], y_val)], verbose=False)
+    xgb_search.fit(X_trainval, y_trainval, eval_set=[(X_val, y_val)], verbose=False)
     print(f"  Best params: {xgb_search.best_params_}")
-    y_pred = xgb_search.predict(X_test[avail_lags])
+    y_pred = xgb_search.predict(X_test)
     metrics = regression_metrics(y_test, y_pred, label="XGBoost")
     metrics["model_obj"] = xgb_search.best_estimator_
-    metrics["feature_subset"] = avail_lags
     results.append(metrics)
 
-    # LightGBM with Optuna (Tweedie + HyperbandPruner)
-    print("Training LightGBM (Optuna, Tweedie)...")
-    optuna.logging.set_verbosity(optuna.logging.WARNING)
-
-    def _lgbm_objective(trial):
-        tweedie_p = trial.suggest_float("tweedie_variance_power", 1.1, 1.9)
-        params = {
-            "objective": "tweedie",
-            "tweedie_variance_power": tweedie_p,
-            "n_estimators": 1000,
-            "learning_rate": trial.suggest_float("learning_rate", 0.03, 0.15, log=True),
-            "num_leaves": trial.suggest_int("num_leaves", 31, 128),
-            "max_depth": trial.suggest_int("max_depth", 5, 12),
-            "min_child_samples": trial.suggest_int("min_child_samples", 10, 100),
-            "subsample": trial.suggest_float("subsample", 0.7, 1.0),
-            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.7, 1.0),
-            "reg_alpha": trial.suggest_float("reg_alpha", 1e-3, 10.0, log=True),
-            "reg_lambda": trial.suggest_float("reg_lambda", 1e-3, 10.0, log=True),
-            "random_state": 42,
-            "n_jobs": -1,
-            "verbose": -1,
-        }
-        model = LGBMRegressor(**params)
-        model.fit(
-            X_train, y_train,
-            eval_set=[(X_val, y_val)],
-            callbacks=[lgbm_early_stopping(stopping_rounds=10, verbose=False)],
-        )
-        trial.set_user_attr("best_iteration", model.best_iteration_)
-        preds = model.predict(X_val)
-        return np.mean(np.abs(y_val.values - preds))
-
-    study = optuna.create_study(
-        direction="minimize",
-        pruner=optuna.pruners.HyperbandPruner(min_resource=50, max_resource=1000, reduction_factor=3),
+    # LightGBM with GridSearchCV
+    print("Training LightGBM (GridSearchCV)...")
+    lgbm = LGBMRegressor(
+        random_state=42, n_jobs=-1, verbose=-1,
+        objective="tweedie", tweedie_variance_power=1.5,
     )
-    study.optimize(_lgbm_objective, n_trials=20, show_progress_bar=False)
-    best_params = study.best_params
-    best_iteration = study.best_trial.user_attrs["best_iteration"]
-    best_tweedie_p = best_params.pop("tweedie_variance_power")
-    best_params.update({
-        "objective": "tweedie",
-        "tweedie_variance_power": best_tweedie_p,
-        "n_estimators": best_iteration,
-        "random_state": 42,
-        "n_jobs": -1,
-        "verbose": -1,
-    })
-    print(f"  Best params: {study.best_params}")
-    print(f"  Best iteration: {best_iteration}")
-    print(f"  Best val MAE: {study.best_value:.4f}")
-
-    lgbm_best = LGBMRegressor(**best_params)
-    lgbm_best.fit(X_trainval, y_trainval)
-    y_pred = lgbm_best.predict(X_test)
+    lgbm_grid = {
+        "n_estimators": [200, 400, 500],
+        "max_depth": [3, 6, -1],
+        "learning_rate": [0.05, 0.1],
+    }
+    lgbm_search = GridSearchCV(
+        lgbm, lgbm_grid, cv=tscv, scoring="neg_mean_absolute_error", verbose=0,
+    )
+    lgbm_search.fit(X_trainval, y_trainval)
+    print(f"  Best params: {lgbm_search.best_params_}")
+    y_pred = lgbm_search.predict(X_test)
     metrics = regression_metrics(y_test, y_pred, label="LightGBM")
-    metrics["model_obj"] = lgbm_best
+    metrics["model_obj"] = lgbm_search.best_estimator_
     results.append(metrics)
 
     return results
