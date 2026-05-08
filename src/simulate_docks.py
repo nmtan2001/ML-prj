@@ -3,7 +3,7 @@
 import numpy as np
 import pandas as pd
 
-from src.config import DEFAULT_STATION_CAPACITY, NEAR_EMPTY_THRESHOLD, NEAR_FULL_RATIO
+from src.config import DATA_PROCESSED, DEFAULT_STATION_CAPACITY, NEAR_EMPTY_THRESHOLD, NEAR_FULL_RATIO
 
 
 def simulate_inventory(hourly: pd.DataFrame, station_info: pd.DataFrame) -> pd.DataFrame:
@@ -56,3 +56,22 @@ if __name__ == "__main__":
     hourly = simulate_inventory(hourly, station_info)
     hourly = label_risk(hourly)
     print(hourly[["station_id", "hour", "bikes_available", "is_high_risk"]].head(20))
+
+
+def simulate_and_label_cached(hourly: pd.DataFrame, station_info: pd.DataFrame) -> pd.DataFrame:
+    """Run simulate_inventory + label_risk with caching.
+
+    Saves to hourly_simulated.parquet and skips if already exists.
+    """
+    cache_path = DATA_PROCESSED / "hourly_simulated.parquet"
+    if cache_path.exists():
+        print("Loading cached simulated dock data...")
+        result = pd.read_parquet(cache_path)
+        print(f"Loaded {len(result)} records from cache.")
+        return result
+    hourly = simulate_inventory(hourly, station_info)
+    hourly = label_risk(hourly)
+    DATA_PROCESSED.mkdir(parents=True, exist_ok=True)
+    hourly.to_parquet(cache_path, index=False)
+    print(f"Cached simulated dock data ({len(hourly)} records).")
+    return hourly
