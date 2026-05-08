@@ -282,9 +282,20 @@ def build_station_info(hourly: pd.DataFrame) -> pd.DataFrame:
 def preprocess() -> tuple[pd.DataFrame, pd.DataFrame]:
     """Run full preprocessing pipeline using incremental loading.
 
+    Loads from cached parquet if available, otherwise reprocesses raw data.
+    Use --force-preprocess to override cache.
+
     Returns:
         Tuple of (hourly_data, station_info) DataFrames.
     """
+    hourly_path = DATA_PROCESSED / "hourly.parquet"
+    station_path = DATA_PROCESSED / "station_info.parquet"
+    if hourly_path.exists() and station_path.exists():
+        print("Loading cached preprocessed data...")
+        hourly = pd.read_parquet(hourly_path)
+        station_info = pd.read_parquet(station_path)
+        print(f"Loaded {len(hourly)} records for {station_info.shape[0]} stations from cache.")
+        return hourly, station_info
     return preprocess_incremental()
 
 
