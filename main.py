@@ -6,7 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 from preprocess import preprocess
-from simulate_docks import label_risk, simulate_inventory
+from simulate_docks import label_risk, simulate_inventory, simulate_and_label_cached
 from features import build_features
 from models.demand import train_demand_models, train_multi_target_models
 from models.risk import train_risk_models
@@ -35,8 +35,7 @@ def main():
     print("\n" + "=" * 60)
     print("STEP 2: Simulating dock inventory")
     print("=" * 60)
-    hourly = simulate_inventory(hourly, station_info)
-    hourly = label_risk(hourly)
+    hourly = simulate_and_label_cached(hourly, station_info)
 
     # Step 3: Feature engineering
     print("\n" + "=" * 60)
