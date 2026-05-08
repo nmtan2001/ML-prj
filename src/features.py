@@ -3,6 +3,8 @@
 import numpy as np
 import pandas as pd
 import holidays as hol
+from sklearn.neighbors import NearestNeighbors
+from sklearn.cluster import KMeans
 
 
 def add_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -10,7 +12,9 @@ def add_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df["hour_of_day"] = df["hour"].dt.hour
     df["day_of_week"] = df["hour"].dt.dayofweek
+    df["month"] = df["hour"].dt.month
     df["is_weekend"] = (df["day_of_week"] >= 5).astype(int)
+    df["is_daylight"] = ((df["hour_of_day"] >= 6) & (df["hour_of_day"] <= 19)).astype(int)
     # Rush hour only on weekdays
     df["is_rush_hour"] = (
         df["hour_of_day"].isin([7, 8, 9, 17, 18, 19]) & (df["is_weekend"] == 0)
@@ -21,6 +25,8 @@ def add_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
     df["hour_cos"] = np.cos(2 * np.pi * df["hour_of_day"] / 24)
     df["dow_sin"] = np.sin(2 * np.pi * df["day_of_week"] / 7)
     df["dow_cos"] = np.cos(2 * np.pi * df["day_of_week"] / 7)
+    df["month_sin"] = np.sin(2 * np.pi * df["month"] / 12)
+    df["month_cos"] = np.cos(2 * np.pi * df["month"] / 12)
 
     # Key interactions
     df["weekend_x_hour"] = df["is_weekend"] * df["hour_of_day"]
@@ -65,6 +71,19 @@ def add_trend_features(df: pd.DataFrame, target: str = "departures") -> pd.DataF
     return df
 
 
+def add_seasonal_lag_features(df: pd.DataFrame, target: str = "departures") -> pd.DataFrame:
+    """Add same-hour, same-day-of-week rolling averages over recent weeks."""
+    df = df.sort_values(["station_id", "hour"]).copy()
+    # Same hour of day, rolling over previous same-hour values
+    for window_days in [3, 7]:
+        col = f"{target}_same_hour_roll_mean_{window_days}d"
+        rolled = df.groupby(["station_id", "hour_of_day"])[target].transform(
+            lambda s: s.shift(1).rolling(window=window_days, min_periods=1).mean()
+        )
+        df[col] = rolled
+    return df
+
+
 def add_holiday_features(df: pd.DataFrame) -> pd.DataFrame:
     """Add US NY-state holiday flags: is_holiday, is_day_before_holiday, is_day_after_holiday."""
     df = df.copy()
@@ -98,8 +117,44 @@ def add_cross_station_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def add_spatial_clusters(df: pd.DataFrame, n_clusters: int = 8) -> pd.DataFrame:
+    """Cluster stations by normalized hourly demand profile for shared learning."""
+    df = df.copy()
+
+    # Use only training period for clustering to avoid leakage
+    timestamps = df["hour"].sort_values().unique()
+    cutoff = timestamps[int(len(timestamps) * 0.70)]
+    train_df = df[df["hour"] < cutoff]
+
+    profile = train_df.pivot_table(
+        index="station_id", columns=train_df["hour"].dt.hour,
+        values="departures", aggfunc="mean",
+    ).fillna(0)
+    norms = np.linalg.norm(profile.values, axis=1, keepdims=True)
+    norms[norms == 0] = 1
+    profile_normed = profile.values / norms
+
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+    clusters = kmeans.fit_predict(profile_normed)
+    cluster_map = dict(zip(profile.index, clusters))
+    df["neighborhood_cluster"] = df["station_id"].map(cluster_map).astype(int)
+
+    # Compute hourly cluster mean, shift it, then merge back
+    df = df.sort_values(["station_id", "hour"])
+    cluster_hourly = df.groupby(["neighborhood_cluster", "hour"])["departures"].mean().reset_index()
+    cluster_hourly = cluster_hourly.rename(columns={"departures": "_cluster_mean"})
+    cluster_hourly = cluster_hourly.sort_values(["neighborhood_cluster", "hour"])
+    for lag in [1, 24]:
+        col = f"cluster_departures_mean_lag_{lag}h"
+        cluster_hourly[f"_shifted_{lag}"] = cluster_hourly.groupby("neighborhood_cluster")["_cluster_mean"].shift(lag)
+        merge_col = cluster_hourly[["neighborhood_cluster", "hour", f"_shifted_{lag}"]].rename(columns={f"_shifted_{lag}": col})
+        df = df.merge(merge_col, on=["neighborhood_cluster", "hour"], how="left")
+
+    return df
+
+
 def add_weather_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Merge weather features from cached parquet file."""
+    """Merge weather features from cached parquet file with enhanced features."""
     from src.config import DATA_PROCESSED
 
     weather_path = DATA_PROCESSED / "weather.parquet"
@@ -108,13 +163,29 @@ def add_weather_features(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     weather = pd.read_parquet(weather_path)
+    weather = weather.sort_values("hour")
+
+    # Precipitation rolling sums before merge
+    weather["precip_roll_sum_3h"] = weather["precipitation"].rolling(3, min_periods=1).sum()
+    weather["precip_roll_sum_6h"] = weather["precipitation"].rolling(6, min_periods=1).sum()
+
     df = df.merge(weather, on="hour", how="left")
-    # Fill any missing weather with forward fill
     weather_cols = [c for c in weather.columns if c != "hour"]
     df[weather_cols] = df[weather_cols].ffill().bfill()
+
+    # Apparent temperature (wind chill / heat index approximation)
+    df["apparent_temp"] = df["temperature"] - (0.1 * df["wind_speed"]) + (0.05 * df["humidity"])
+
     # Weather interactions
     if "precipitation" in df.columns and "is_weekend" in df.columns:
         df["precipitation_x_weekend"] = df["precipitation"] * df["is_weekend"]
+    if "precipitation" in df.columns and "is_rush_hour" in df.columns:
+        df["precipitation_x_rush"] = df["precipitation"] * df["is_rush_hour"]
+    if "temperature" in df.columns and "hour_sin" in df.columns:
+        df["temp_x_hour_sin"] = df["temperature"] * df["hour_sin"]
+    if "temperature" in df.columns and "humidity" in df.columns:
+        df["temp_x_humidity"] = df["temperature"] * df["humidity"]
+
     return df
 
 
@@ -166,6 +237,51 @@ def add_station_encoding(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def add_spatial_lag_features(
+    df: pd.DataFrame, target: str = "departures", k: int = 5, lag_hours: list = None,
+) -> pd.DataFrame:
+    """Add KNN spatial lag features using nearest-station demand at lagged hours."""
+    if lag_hours is None:
+        lag_hours = [1, 3, 24]
+
+    df = df.copy()
+    station_coords = df.groupby("station_id")[["latitude", "longitude"]].first()
+    if len(station_coords) < k + 1:
+        k = max(1, len(station_coords) - 1)
+
+    # Find K nearest neighbors per station
+    nn = NearestNeighbors(n_neighbors=k + 1, metric="euclidean")
+    nn.fit(station_coords.values)
+    _, indices = nn.kneighbors(station_coords.values)
+    # Exclude self (index 0 is always self)
+    neighbor_map = {
+        sid: station_coords.index[indices[i, 1:]].tolist()
+        for i, sid in enumerate(station_coords.index)
+    }
+
+    # Pivot target to wide form (hour x station) with hourly frequency
+    wide = df.pivot_table(index="hour", columns="station_id", values=target, aggfunc="sum").sort_index()
+    wide = wide.asfreq("h").sort_index()
+
+    for lag in lag_hours:
+        shifted = wide.shift(lag)
+        mean_col = f"knn_{target}_mean_lag_{lag}h"
+
+        mean_vals = np.full(len(df), np.nan)
+
+        for sid, neighbors in neighbor_map.items():
+            mask = df["station_id"] == sid
+            hours = df.loc[mask, "hour"]
+            if not neighbors or sid not in shifted.columns:
+                continue
+            neighbor_data = shifted[neighbors].loc[hours.values]
+            mean_vals[mask.values] = neighbor_data.mean(axis=1, skipna=True).values
+
+        df[mean_col] = mean_vals
+
+    return df
+
+
 def build_features(hourly: pd.DataFrame, target: str = "departures") -> pd.DataFrame:
     """
     Run full feature engineering pipeline.
@@ -185,8 +301,17 @@ def build_features(hourly: pd.DataFrame, target: str = "departures") -> pd.DataF
     print("Adding trend features...")
     df = add_trend_features(df, target=target)
 
+    print("Adding seasonal lag features...")
+    df = add_seasonal_lag_features(df, target=target)
+
     print("Adding cross-station features...")
     df = add_cross_station_features(df)
+
+    print("Adding spatial clusters...")
+    df = add_spatial_clusters(df)
+
+    print("Adding KNN spatial lag features...")
+    df = add_spatial_lag_features(df, target=target)
 
     print("Adding weather features...")
     df = add_weather_features(df)

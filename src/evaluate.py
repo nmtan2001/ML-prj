@@ -19,17 +19,17 @@ import seaborn as sns
 
 
 def regression_metrics(y_true: pd.Series, y_pred: pd.Series, label: str = "") -> dict:
-    """Compute regression metrics."""
+    """Compute regression metrics including WAPE."""
     mae = mean_absolute_error(y_true, y_pred)
-    # MAPE with protection against division by zero
-    mask = y_true != 0
-    mape = np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask])) * 100 if mask.any() else 0
+    # WAPE: weighted absolute percentage error (stable for sparse data)
+    denom = np.sum(np.abs(y_true))
+    wape = np.sum(np.abs(y_true - y_pred)) / denom * 100 if denom > 0 else 0
     return {
         "model": label,
         "MAE": mae,
         "RMSE": root_mean_squared_error(y_true, y_pred),
         "R2": r2_score(y_true, y_pred),
-        "MAPE": mape,
+        "WAPE": wape,
     }
 
 

@@ -62,7 +62,7 @@ def fetch_and_cache_weather(start_date: str, end_date: str, cache_path=None) -> 
         cached_end = pd.to_datetime(cached["hour"].max())
         req_start = pd.to_datetime(start_date)
         req_end = pd.to_datetime(end_date)
-        if cached_start <= req_start and cached_end >= req_end:
+        if cached_start.date() <= req_start.date() and cached_end.date() >= req_end.date():
             print(f"Loading cached weather data from {cache_path}")
             return cached
         print(f"Cached weather range [{cached_start.date()}, {cached_end.date()}] "

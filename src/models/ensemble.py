@@ -75,10 +75,12 @@ def train_ensemble(
     weights_inv /= weights_inv.sum()
 
     y_pred_inv = test_stack @ weights_inv
-    mae_inv = np.mean(np.abs(y_test.values - y_pred_inv))
+    val_pred_inv = val_stack @ weights_inv
+    mae_inv_val = np.mean(np.abs(y_val.values - val_pred_inv))
+    mae_inv_test = np.mean(np.abs(y_test.values - y_pred_inv))
 
     print(f"  Inverse-MAE weights: {dict(zip(model_names, weights_inv.round(4)))}")
-    print(f"  Inverse-MAE blend MAE: {mae_inv:.4f}")
+    print(f"  Inverse-MAE blend val MAE: {mae_inv_val:.4f}, test MAE: {mae_inv_test:.4f}")
 
     # Method 2: NNLS (non-negative least squares) on validation predictions
     # NNLS ensures all weights >= 0, avoiding the Ridge overfitting issue
@@ -89,23 +91,35 @@ def train_ensemble(
         weights_nnls = np.ones(len(eligible)) / len(eligible)
 
     y_pred_nnls = test_stack @ weights_nnls
-    mae_nnls = np.mean(np.abs(y_test.values - y_pred_nnls))
+    val_pred_nnls = val_stack @ weights_nnls
+    mae_nnls_val = np.mean(np.abs(y_val.values - val_pred_nnls))
+    mae_nnls_test = np.mean(np.abs(y_test.values - y_pred_nnls))
 
     print(f"  NNLS weights: {dict(zip(model_names, weights_nnls.round(4)))}")
-    print(f"  NNLS blend MAE: {mae_nnls:.4f}")
+    print(f"  NNLS blend val MAE: {mae_nnls_val:.4f}, test MAE: {mae_nnls_test:.4f}")
 
-    # Pick the better blend
-    if mae_nnls < mae_inv:
-        y_pred_ensemble = y_pred_nnls
-        chosen_weights = weights_nnls
-        method = "NNLS"
-    else:
-        y_pred_ensemble = y_pred_inv
-        chosen_weights = weights_inv
-        method = "InvMAE"
+    # Method 3: Manual stacking with Ridge meta-learner
+    from sklearn.linear_model import RidgeCV
+    from sklearn.model_selection import TimeSeriesSplit as TSCV
+    meta = RidgeCV(alphas=[0.1, 1.0, 10.0, 100.0], cv=TSCV(n_splits=3))
+    meta.fit(val_stack, y_val.values)
+    y_pred_stack = meta.predict(test_stack)
+    val_pred_stack = meta.predict(val_stack)
+    mae_stack_val = np.mean(np.abs(y_val.values - val_pred_stack))
+    mae_stack_test = np.mean(np.abs(y_test.values - y_pred_stack))
+    stack_weights = dict(zip(model_names, meta.coef_.round(4)))
+    print(f"  Ridge-stack weights: {stack_weights}, intercept={meta.intercept_:.4f}")
+    print(f"  Stacking blend val MAE: {mae_stack_val:.4f}, test MAE: {mae_stack_test:.4f}")
 
-    print(f"  Selected method: {method}")
-    print(f"  Final weights: {dict(zip(model_names, chosen_weights.round(4)))}")
+    # Pick best method based on VALIDATION MAE to avoid test leakage
+    candidates = [
+        (mae_inv_val, mae_inv_test, y_pred_inv, "InvMAE"),
+        (mae_nnls_val, mae_nnls_test, y_pred_nnls, "NNLS"),
+        (mae_stack_val, mae_stack_test, y_pred_stack, "Stacking"),
+    ]
+    best_val_mae, best_mae, y_pred_ensemble, method = min(candidates, key=lambda x: x[0])
+
+    print(f"  Selected method: {method} (MAE={best_mae:.4f})")
 
     metrics = regression_metrics(y_test, y_pred_ensemble, label="Ensemble-Blend")
     metrics["model_obj"] = eligible[0]["model_obj"]  # store best model for downstream use

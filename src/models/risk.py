@@ -14,6 +14,26 @@ from lightgbm import LGBMClassifier
 from src.evaluate import classification_metrics
 
 
+def _focal_loss_xgb(preds, dtrain, gamma=2.0, alpha=0.25):
+    """Custom XGBoost objective: focal loss for binary classification.
+
+    FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t)
+    Down-weights well-classified examples to focus on hard minority class.
+    """
+    labels = dtrain.get_label()
+    preds = 1.0 / (1.0 + np.exp(-preds))  # sigmoid
+    eps = 1e-7
+    preds = np.clip(preds, eps, 1 - eps)
+
+    p_t = np.where(labels == 1, preds, 1 - preds)
+    alpha_t = np.where(labels == 1, alpha, 1 - alpha)
+    focal_weight = alpha_t * (1 - p_t) ** gamma
+
+    grad = focal_weight * (preds - labels)
+    hess = focal_weight * preds * (1 - preds)
+    return grad, hess
+
+
 FEATURE_COLS_RISK = [
     "hour_of_day", "day_of_week", "is_weekend", "is_rush_hour",
     "hour_sin", "hour_cos", "dow_sin", "dow_cos",
@@ -33,6 +53,10 @@ FEATURE_COLS_RISK = [
     "temperature", "humidity", "precipitation", "wind_speed",
     "is_precipitating", "precipitation_x_weekend",
     "station_mean_demand", "station_hour_mean", "station_weekend_ratio",
+    "knn_departures_sum_lag_1h", "knn_departures_mean_lag_1h",
+    "knn_departures_sum_lag_3h", "knn_departures_mean_lag_3h",
+    "knn_departures_sum_lag_24h", "knn_departures_mean_lag_24h",
+    "forecasted_departures", "forecasted_net_flow", "forecasted_bikes_available",
 ]
 
 
@@ -127,16 +151,32 @@ def train_risk_models(df: pd.DataFrame, target: str = "is_high_risk") -> list[di
     lgbm_search.fit(X_trainval, y_trainval)
     print(f"  Best params: {lgbm_search.best_params_}")
 
+    # XGBoost with focal loss (uses best params from standard XGBoost)
+    print("Training XGBoost-FocalLoss...")
+    best_xgb_params = xgb_search.best_params_
+    focal_model = XGBClassifier(
+        random_state=42,
+        scale_pos_weight=scale_ratio,
+        early_stopping_rounds=20,
+        objective=_focal_loss_xgb,
+        **best_xgb_params,
+    )
+    focal_model.fit(
+        X_trainval, y_trainval,
+        eval_set=[(X_val, y_val)],
+        verbose=False,
+    )
+
     # Evaluate all with threshold tuning
     results = []
-    for name, search in [
-        ("LogisticRegression", lr_search),
-        ("RandomForest", rf_search),
-        ("XGBoost", xgb_search),
-        ("LightGBM", lgbm_search),
-    ]:
-        model = search.best_estimator_
-
+    models_to_eval = [
+        ("LogisticRegression", lr_search.best_estimator_),
+        ("RandomForest", rf_search.best_estimator_),
+        ("XGBoost", xgb_search.best_estimator_),
+        ("LightGBM", lgbm_search.best_estimator_),
+        ("XGBoost-FocalLoss", focal_model),
+    ]
+    for name, model in models_to_eval:
         best_thresh = _find_best_threshold(model, X_val, y_val)
         print(f"  {name} optimal threshold: {best_thresh:.2f}")
 

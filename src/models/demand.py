@@ -5,6 +5,7 @@ import pandas as pd
 from sklearn.linear_model import Ridge
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
+from sklearn.multioutput import MultiOutputRegressor
 from sklearn.preprocessing import StandardScaler
 from xgboost import XGBRegressor
 from lightgbm import LGBMRegressor
@@ -12,6 +13,8 @@ from skforecast.recursive import ForecasterRecursiveMultiSeries
 from skforecast.model_selection import TimeSeriesFold, grid_search_forecaster_multiseries
 
 from src.evaluate import regression_metrics
+import optuna
+from lightgbm import early_stopping as lgbm_early_stopping
 
 
 def time_split(df: pd.DataFrame):
@@ -30,23 +33,43 @@ def time_split(df: pd.DataFrame):
 
 
 FEATURE_COLS_DEMAND = [
-    "hour_of_day", "day_of_week", "is_weekend", "is_rush_hour",
-    "hour_sin", "hour_cos", "dow_sin", "dow_cos",
+    # Temporal
+    "hour_of_day", "day_of_week", "month", "is_weekend", "is_rush_hour",
+    "is_daylight",
+    "hour_sin", "hour_cos", "dow_sin", "dow_cos", "month_sin", "month_cos",
     "weekend_x_hour", "rush_x_weekend",
+    # Holiday
     "is_holiday", "is_day_before_holiday", "is_day_after_holiday",
+    # Lag
     "departures_lag_1h", "departures_lag_2h", "departures_lag_3h",
     "departures_lag_12h", "departures_lag_24h", "departures_lag_48h",
     "departures_lag_168h", "departures_lag_336h", "departures_lag_672h",
+    # Rolling
     "departures_roll_mean_3h", "departures_roll_mean_6h",
     "departures_roll_mean_12h", "departures_roll_mean_24h",
     "departures_roll_std_3h", "departures_roll_std_6h",
     "departures_roll_std_12h", "departures_roll_std_24h",
+    # Trend
     "departures_diff_1h",
-    "area_total_departures", "area_active_stations",
-    "latitude", "longitude",
+    # Seasonal same-hour lags
+    "departures_same_hour_roll_mean_3d", "departures_same_hour_roll_mean_7d",
+    # Cross-station
+    "area_total_departures", "area_total_arrivals", "area_active_stations",
+    # Spatial
+    "latitude", "longitude", "neighborhood_cluster",
+    "cluster_departures_mean_lag_1h", "cluster_departures_mean_lag_24h",
+    # Weather
     "temperature", "humidity", "precipitation", "wind_speed",
-    "is_precipitating", "precipitation_x_weekend",
+    "is_precipitating", "precip_roll_sum_3h", "precip_roll_sum_6h",
+    "apparent_temp",
+    "precipitation_x_weekend", "precipitation_x_rush",
+    "temp_x_hour_sin", "temp_x_humidity",
+    # Station encoding
     "station_mean_demand", "station_hour_mean", "station_weekend_ratio",
+    # KNN spatial lags
+    "knn_departures_mean_lag_1h",
+    "knn_departures_mean_lag_3h",
+    "knn_departures_mean_lag_24h",
 ]
 
 
@@ -113,7 +136,10 @@ def train_demand_models(df: pd.DataFrame, target: str = "departures") -> list[di
 
     # XGBoost with GridSearchCV + early stopping
     print("Training XGBoost (GridSearchCV)...")
-    xgb = XGBRegressor(random_state=42, n_jobs=-1, early_stopping_rounds=20)
+    xgb = XGBRegressor(
+        random_state=42, n_jobs=-1, early_stopping_rounds=20,
+        objective="reg:tweedie", tweedie_variance_power=1.5,
+    )
     xgb_grid = {
         "n_estimators": [200, 400],
         "max_depth": [3, 6],
@@ -129,22 +155,58 @@ def train_demand_models(df: pd.DataFrame, target: str = "departures") -> list[di
     metrics["model_obj"] = xgb_search.best_estimator_
     results.append(metrics)
 
-    # LightGBM with GridSearchCV
-    print("Training LightGBM (GridSearchCV)...")
-    lgbm = LGBMRegressor(random_state=42, n_jobs=-1, verbose=-1)
-    lgbm_grid = {
-        "n_estimators": [200, 400],
-        "max_depth": [3, 6, -1],
-        "learning_rate": [0.05, 0.1],
-    }
-    lgbm_search = GridSearchCV(
-        lgbm, lgbm_grid, cv=tscv, scoring="neg_mean_absolute_error", verbose=0,
-    )
-    lgbm_search.fit(X_trainval, y_trainval)
-    print(f"  Best params: {lgbm_search.best_params_}")
-    y_pred = lgbm_search.predict(X_test)
+    # LightGBM with Optuna
+    print("Training LightGBM (Optuna)...")
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+    def _lgbm_objective(trial):
+        params = {
+            "objective": "poisson",
+            "n_estimators": 1000,
+            "learning_rate": trial.suggest_float("learning_rate", 0.03, 0.15, log=True),
+            "num_leaves": trial.suggest_int("num_leaves", 31, 128),
+            "max_depth": trial.suggest_int("max_depth", 5, 12),
+            "min_child_samples": trial.suggest_int("min_child_samples", 10, 100),
+            "subsample": trial.suggest_float("subsample", 0.7, 1.0),
+            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.7, 1.0),
+            "reg_alpha": trial.suggest_float("reg_alpha", 1e-3, 10.0, log=True),
+            "reg_lambda": trial.suggest_float("reg_lambda", 1e-3, 10.0, log=True),
+            "random_state": 42,
+            "n_jobs": -1,
+            "verbose": -1,
+            "device": "gpu",
+        }
+        model = LGBMRegressor(**params)
+        model.fit(
+            X_train, y_train,
+            eval_set=[(X_val, y_val)],
+            callbacks=[lgbm_early_stopping(stopping_rounds=10, verbose=False)],
+        )
+        trial.set_user_attr("best_iteration", model.best_iteration_)
+        preds = model.predict(X_val)
+        return np.mean(np.abs(y_val.values - preds))
+
+    study = optuna.create_study(direction="minimize")
+    study.optimize(_lgbm_objective, n_trials=20, show_progress_bar=False)
+    best_params = study.best_params
+    best_iteration = study.best_trial.user_attrs["best_iteration"]
+    best_params.update({
+        "objective": "poisson",
+        "n_estimators": best_iteration,
+        "random_state": 42,
+        "n_jobs": -1,
+        "verbose": -1,
+        "device": "gpu",
+    })
+    print(f"  Best params: {study.best_params}")
+    print(f"  Best iteration: {best_iteration}")
+    print(f"  Best val MAE: {study.best_value:.4f}")
+
+    lgbm_best = LGBMRegressor(**best_params)
+    lgbm_best.fit(X_trainval, y_trainval)
+    y_pred = lgbm_best.predict(X_test)
     metrics = regression_metrics(y_test, y_pred, label="LightGBM")
-    metrics["model_obj"] = lgbm_search.best_estimator_
+    metrics["model_obj"] = lgbm_best
     results.append(metrics)
 
     return results
@@ -242,3 +304,90 @@ def train_skforecast_model(df: pd.DataFrame, target: str = "departures") -> dict
     metrics["model_obj"] = forecaster
     print(f"  skforecast-MultiSeries  MAE={metrics['MAE']:.4f}  RMSE={metrics['RMSE']:.4f}")
     return metrics
+
+
+def train_multi_target_models(
+    df: pd.DataFrame, targets: list = None,
+) -> dict:
+    """Train multi-target models predicting departures and arrivals jointly.
+
+    Uses MultiOutputRegressor wrapping XGBoost (Tweedie) and LightGBM.
+    Returns per-target MAE and predicted net flow.
+    """
+    if targets is None:
+        targets = ["departures", "arrivals"]
+
+    available_features = [c for c in FEATURE_COLS_DEMAND if c in df.columns]
+    train, val, test = time_split(df)
+
+    X_trainval = pd.concat([train[available_features], val[available_features]])
+    y_trainval = pd.concat([train[targets], val[targets]])
+    X_test = test[available_features]
+    y_test = test[targets]
+    tscv = TimeSeriesSplit(n_splits=3)
+
+    results = {"model_name": "MultiTarget"}
+
+    for base_cls, name, grid in [
+        (XGBRegressor, "MultiTarget-XGB", {
+            "estimator__n_estimators": [200, 400],
+            "estimator__max_depth": [3, 6],
+            "estimator__learning_rate": [0.05, 0.1],
+        }),
+        (LGBMRegressor, "MultiTarget-LGBM", {
+            "estimator__n_estimators": [200, 400],
+            "estimator__max_depth": [3, 6, -1],
+            "estimator__learning_rate": [0.05, 0.1],
+        }),
+    ]:
+        if base_cls == XGBRegressor:
+            base = base_cls(
+                random_state=42, n_jobs=-1,
+                objective="reg:tweedie", tweedie_variance_power=1.5,
+            )
+        else:
+            base = base_cls(
+                random_state=42, n_jobs=-1, verbose=-1,
+                objective="tweedie", tweedie_variance_power=1.5,
+            )
+        mor = MultiOutputRegressor(base)
+        search = GridSearchCV(
+            mor, grid, cv=tscv,
+            scoring="neg_mean_absolute_error", verbose=0,
+        )
+        print(f"Training {name} (GridSearchCV)...")
+        search.fit(X_trainval, y_trainval)
+        print(f"  Best params: {search.best_params_}")
+
+        y_pred = search.predict(X_test)
+        per_target = {}
+        for i, t in enumerate(targets):
+            mae = np.mean(np.abs(y_test[t].values - y_pred[:, i]))
+            per_target[t] = mae
+            print(f"  {name} {t} MAE={mae:.4f}")
+
+        results[f"{name}_obj"] = search.best_estimator_
+        results[f"{name}_pred"] = y_pred
+        results[f"{name}_mae"] = per_target
+
+    # Use best multi-target model (lower sum of MAEs) for net flow
+    best_key = None
+    best_sum = float("inf")
+    for key in [k for k in results if k.endswith("_mae")]:
+        mae_sum = sum(results[key].values())
+        if mae_sum < best_sum:
+            best_sum = mae_sum
+            best_key = key
+
+    best_prefix = best_key.replace("_mae", "")
+    best_pred = results[f"{best_prefix}_pred"]
+    arrivals_idx = targets.index("arrivals") if "arrivals" in targets else 1
+    departures_idx = targets.index("departures") if "departures" in targets else 0
+    net_flow_pred = best_pred[:, arrivals_idx] - best_pred[:, departures_idx]
+
+    results["y_pred_departures"] = best_pred[:, departures_idx]
+    results["y_pred_arrivals"] = best_pred[:, arrivals_idx]
+    results["y_pred_net_flow"] = net_flow_pred
+    results["best_model_obj"] = results[f"{best_prefix}_obj"]
+
+    return results

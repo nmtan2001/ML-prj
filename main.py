@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 from preprocess import preprocess
 from simulate_docks import label_risk, simulate_inventory
 from features import build_features
-from models.demand import train_demand_models
+from models.demand import train_demand_models, train_multi_target_models
 from models.risk import train_risk_models
 from models.ensemble import train_ensemble
 from models.prioritize import compute_priority_score
@@ -50,7 +50,7 @@ def main():
     print("=" * 60)
     demand_results = train_demand_models(df, target="departures")
     for r in demand_results:
-        print(f"  {r['model']:20s} MAE={r['MAE']:.4f}  RMSE={r['RMSE']:.4f}  MAPE={r['MAPE']:.1f}%")
+        print(f"  {r['model']:20s} MAE={r['MAE']:.4f}  RMSE={r['RMSE']:.4f}  WAPE={r['WAPE']:.1f}%")
 
     fig = plot_model_comparison(demand_results, "MAE", title="Task 1: MAE Comparison")
     fig.savefig("output_demand_mae.png", dpi=150, bbox_inches="tight")
@@ -65,7 +65,37 @@ def main():
     if ensemble_result is not None:
         demand_results.append(ensemble_result)
         print(f"  {'Ensemble-Blend':20s} MAE={ensemble_result['MAE']:.4f}  "
-              f"RMSE={ensemble_result['RMSE']:.4f}  MAPE={ensemble_result['MAPE']:.1f}%")
+              f"RMSE={ensemble_result['RMSE']:.4f}  WAPE={ensemble_result['WAPE']:.1f}%")
+
+    # Step 4.5: Multi-target forecasting (departures + arrivals)
+    print("\n" + "=" * 60)
+    print("STEP 4.5: Multi-target forecasting")
+    print("=" * 60)
+    mt_results = train_multi_target_models(df)
+
+    # Compute forecasted features for risk model
+    print("Computing forecasted features for risk model...")
+    from models.demand import time_split, FEATURE_COLS_DEMAND
+    _, _, test_df_mt = time_split(df)
+    avail = [c for c in FEATURE_COLS_DEMAND if c in df.columns]
+
+    # Use best demand model for forecasted_departures on all rows
+    _excluded = {"Naive", "HistAvg", "Ensemble-Blend", "skforecast-MultiSeries"}
+    best_demand = min(
+        [r for r in demand_results if r["model"] not in _excluded],
+        key=lambda r: r["MAE"],
+    )
+    df["forecasted_departures"] = best_demand["model_obj"].predict(df[avail])
+
+    # Use multi-target model for net flow on all rows
+    df["forecasted_arrivals"] = mt_results["best_model_obj"].predict(df[avail])[:, 1]
+    df["forecasted_net_flow"] = df["forecasted_arrivals"] - df["forecasted_departures"]
+
+    # Forecasted bikes available = lag + net flow
+    if "bikes_available_lag_1h" in df.columns:
+        df["forecasted_bikes_available"] = df["bikes_available_lag_1h"] + df["forecasted_net_flow"]
+    else:
+        df["forecasted_bikes_available"] = 0.0
 
     # Step 5: Task 2 - Risk classification
     print("\n" + "=" * 60)
@@ -87,17 +117,9 @@ def main():
     print("\n" + "=" * 60)
     print("STEP 6: Task 3 - Capacity prioritization")
     print("=" * 60)
-    from models.demand import time_split, FEATURE_COLS_DEMAND
     _, _, test_df = time_split(df)
-
-    # Use best demand model predictions (exclude baselines, ensemble, skforecast)
-    _task3_excluded = {"Naive", "HistAvg", "Ensemble-Blend", "skforecast-MultiSeries"}
-    best_demand = min(
-        [r for r in demand_results if r["model"] not in _task3_excluded],
-        key=lambda r: r["MAE"],
-    )
-    avail = [c for c in FEATURE_COLS_DEMAND if c in test_df.columns]
-    test_df["predicted_departures"] = best_demand["model_obj"].predict(test_df[avail])
+    avail_test = [c for c in FEATURE_COLS_DEMAND if c in test_df.columns]
+    test_df["predicted_departures"] = best_demand["model_obj"].predict(test_df[avail_test])
 
     # Use best risk model predictions
     best_risk_model = max(risk_results, key=lambda r: r["F1"])
