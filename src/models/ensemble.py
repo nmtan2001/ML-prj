@@ -45,15 +45,10 @@ def train_ensemble(
     _, _, test = time_split(df)
     available_features = [c for c in FEATURE_COLS_DEMAND if c in df.columns]
 
-    X_test_full = test[available_features]
+    X_test = test[available_features]
     y_test = test[target]
 
-    # Use each model's specific feature subset (for diversity)
-    preds = []
-    for r in eligible:
-        feat_sub = r.get("feature_subset", available_features)
-        preds.append(r["model_obj"].predict(X_test_full[feat_sub]))
-    test_preds = np.column_stack(preds)
+    test_preds = np.column_stack([r["model_obj"].predict(X_test) for r in eligible])
     model_names = [r["model"] for r in eligible]
 
     # Inverse-MAE weights from out-of-sample test MAE
