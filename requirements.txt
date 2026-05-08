@@ -1,0 +1,16 @@
+pandas>=3.0.2
+numpy>=2.4.4
+scikit-learn>=1.6.1
+xgboost>=3.2.0
+lightgbm>=4.6.0
+optuna>=4.8.0
+holidays>=0.96
+matplotlib>=3.10.9
+seaborn>=0.13.2
+joblib>=1.5.3
+skforecast>=0.19.1
+scipy>=1.17.1
+tqdm>=4.67.3
+requests>=2.33.1
+shap>=0.47.0
+pyarrow>=20.0.0
