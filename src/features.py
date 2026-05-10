@@ -29,17 +29,16 @@ def add_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
     df["month_sin"] = np.sin(2 * np.pi * df["month"] / 12)
     df["month_cos"] = np.cos(2 * np.pi * df["month"] / 12)
 
-    # Fourier terms for multiple seasonalities
-    # 24h period: harmonics 1-3
+    # Fourier terms for multi-seasonality
     for k in [1, 2, 3]:
         df[f"fourier_24h_sin_{k}"] = np.sin(2 * np.pi * k * df["hour_of_day"] / 24)
         df[f"fourier_24h_cos_{k}"] = np.cos(2 * np.pi * k * df["hour_of_day"] / 24)
-    # 168h period (weekly): harmonics 1-2
+    # Weekly period
     hour_of_week = df["day_of_week"] * 24 + df["hour_of_day"]
     for k in [1, 2]:
         df[f"fourier_168h_sin_{k}"] = np.sin(2 * np.pi * k * hour_of_week / 168)
         df[f"fourier_168h_cos_{k}"] = np.cos(2 * np.pi * k * hour_of_week / 168)
-    # 8766h period (yearly): harmonic 1
+    # Yearly period
     hour_of_year = (df["hour"] - df["hour"].dt.normalize()).dt.total_seconds() / 3600
     day_of_year = df["hour"].dt.dayofyear
     hours_since_year_start = (day_of_year - 1) * 24 + df["hour_of_day"]
@@ -208,13 +207,8 @@ def add_weather_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def add_station_encoding(df: pd.DataFrame) -> pd.DataFrame:
-    """Add target-encoded station features computed from training-period data only.
-
-    station_mean_demand: average departures per station (smoothed toward global mean).
-    station_hour_mean: average departures per (station, hour_of_day).
-    station_weekend_ratio: ratio of weekend to weekday avg demand per station.
-    """
-    # Use first 70% of time range for encoding to avoid leakage
+    """Target-encoded station features from training period only."""
+    # First 70% of time range for encoding
     timestamps = df["hour"].sort_values().unique()
     cutoff = timestamps[int(len(timestamps) * 0.70)]
     train_mask = df["hour"] < cutoff
@@ -301,10 +295,7 @@ def add_spatial_lag_features(
 
 
 def add_anomaly_features(df: pd.DataFrame, target: str = "departures") -> pd.DataFrame:
-    """Add Isolation Forest anomaly score per station based on recent demand patterns.
-
-    Computed on training period only to avoid leakage.
-    """
+    """Isolation Forest anomaly score, fit on training period only."""
     df = df.copy()
     timestamps = df["hour"].sort_values().unique()
     cutoff = timestamps[int(len(timestamps) * 0.70)]
