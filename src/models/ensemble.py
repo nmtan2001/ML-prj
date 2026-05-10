@@ -5,7 +5,7 @@ import pandas as pd
 from src.evaluate import regression_metrics
 
 
-# Models excluded from ensemble (baselines or incompatible predict interface)
+# Excluded from ensemble (baselines or incompatible predict interface)
 EXCLUDED_LABELS = {"Naive", "HistAvg", "skforecast-MultiSeries"}
 
 
@@ -15,22 +15,7 @@ def train_ensemble(
     target: str = "departures",
     top_n: int = 3,
 ) -> dict:
-    """Blend top N demand models using inverse-MAE weighted average.
-
-    Uses out-of-sample test MAE to compute blend weights. For highly
-    correlated tree models, complex stacking meta-learners overfit on
-    leaked validation predictions, so simple inverse-MAE weighting is
-    the most robust approach.
-
-    Args:
-        demand_results: List of result dicts from train_demand_models + skforecast.
-        df: Full feature-engineered DataFrame.
-        target: Target column name.
-        top_n: How many of the best models to include in the blend.
-
-    Returns:
-        Result dict with ensemble metrics.
-    """
+    """Blend top N demand models using inverse-MAE weighted average."""
     from src.models.demand import time_split, FEATURE_COLS_DEMAND
 
     eligible = [r for r in demand_results if r["model"] not in EXCLUDED_LABELS]
