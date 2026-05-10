@@ -16,10 +16,7 @@ from src.evaluate import regression_metrics
 
 
 def time_split(df: pd.DataFrame):
-    """Split data chronologically using global timestamp cutoffs (70/15/15).
-
-    Ensures all stations share the same date boundaries for train/val/test.
-    """
+    """Chronological 70/15/15 split by global timestamp."""
     timestamps = df["hour"].sort_values().unique()
     n = len(timestamps)
     train_end = timestamps[int(n * 0.70)]
@@ -81,12 +78,7 @@ FEATURE_COLS_DEMAND = [
 
 
 def train_demand_models(df: pd.DataFrame, target: str = "departures") -> list[dict]:
-    """Train and evaluate demand forecasting models with GridSearchCV.
-
-    Uses global timestamp split. GridSearchCV with TimeSeriesSplit for
-    hyperparameter tuning on RF and XGBoost.
-    Returns list of result dicts with metrics and trained model objects.
-    """
+    """Train demand forecasting models with GridSearchCV."""
     available_features = [c for c in FEATURE_COLS_DEMAND if c in df.columns]
     train, val, test = time_split(df)
 
@@ -94,7 +86,7 @@ def train_demand_models(df: pd.DataFrame, target: str = "departures") -> list[di
     X_val, y_val = val[available_features], val[target]
     X_test, y_test = test[available_features], test[target]
 
-    # Combine train+val for GridSearchCV (CV splits internally)
+    # Combine train+val for GridSearchCV
     X_trainval = pd.concat([X_train, X_val])
     y_trainval = pd.concat([y_train, y_val])
     tscv = TimeSeriesSplit(n_splits=3)
@@ -187,15 +179,11 @@ def train_demand_models(df: pd.DataFrame, target: str = "departures") -> list[di
 
 
 def train_skforecast_model(df: pd.DataFrame, target: str = "departures") -> dict:
-    """Train a skforecast ForecasterRecursiveMultiSeries with grid search.
-
-    Uses per-station exog dicts with station-specific encoding features.
-    Compact grid (2 lags x 4 params) to keep runtime manageable.
-    """
+    """Train skforecast ForecasterRecursiveMultiSeries with grid search."""
     train, val, test = time_split(df)
     fit_data = pd.concat([train, val])
 
-    # Exog features: calendar + weather + station-specific encoding + holiday
+    # Exog features for skforecast
     shared_exog_cols = [
         "hour_of_day", "day_of_week", "is_weekend", "is_rush_hour",
         "hour_sin", "hour_cos", "dow_sin", "dow_cos",
@@ -283,11 +271,7 @@ def train_skforecast_model(df: pd.DataFrame, target: str = "departures") -> dict
 def train_multi_target_models(
     df: pd.DataFrame, targets: list = None,
 ) -> dict:
-    """Train multi-target models predicting departures and arrivals jointly.
-
-    Uses MultiOutputRegressor wrapping XGBoost (Tweedie) and LightGBM.
-    Returns per-target MAE and predicted net flow.
-    """
+    """Train multi-target models (departures + arrivals) with MultiOutputRegressor."""
     if targets is None:
         targets = ["departures", "arrivals"]
 
