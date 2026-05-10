@@ -12,23 +12,28 @@ Predict hourly station-level demand, classify risk of dock overflow/emptiness, a
 
 ## Results
 
-| Model | MAE | RMSE | MAPE |
+### Task 1: Demand Forecasting
+
+| Model | MAE | RMSE | WAPE |
 |-------|-----|------|------|
-| Ensemble-Blend | 2.76 | 4.12 | 49.7% |
-| XGBoost | 2.78 | 4.13 | 50.0% |
-| LightGBM | 2.79 | 4.14 | 50.5% |
-| RandomForest | 2.85 | 4.27 | 51.5% |
-| Ridge | 3.86 | 5.47 | 83.3% |
-| skforecast-MultiSeries | 3.88 | 5.67 | -- |
-| Naive | 4.23 | 6.65 | 71.1% |
-| HistAvg | 8.78 | 11.55 | 220.6% |
+| LightGBM | 2.81 | 4.26 | 31.1% |
+| Ensemble-Blend | 2.82 | 4.27 | 31.2% |
+| XGBoost | 2.88 | 4.36 | 31.8% |
+| RandomForest | 2.95 | 4.49 | 32.7% |
+| Ridge | 3.42 | 5.03 | 37.9% |
+| skforecast-MultiSeries | 3.75 | 5.46 | -- |
+| Naive | 4.31 | 6.74 | 47.7% |
+| HistAvg | 8.91 | 11.68 | 98.6% |
+
+### Task 2: Risk Classification
 
 | Model | Accuracy | F1 | Precision | Recall |
 |-------|----------|-----|-----------|--------|
-| LightGBM | 0.925 | 0.599 | 0.549 | 0.659 |
-| XGBoost | 0.925 | 0.599 | 0.551 | 0.655 |
-| RandomForest | 0.923 | 0.578 | 0.539 | 0.623 |
-| LogisticRegression | 0.853 | 0.399 | 0.306 | 0.575 |
+| LightGBM | 0.933 | 0.614 | 0.616 | 0.611 |
+| XGBoost | 0.935 | 0.607 | 0.634 | 0.582 |
+| RandomForest | 0.936 | 0.599 | 0.653 | 0.553 |
+| XGBoost-FocalLoss | 0.937 | 0.574 | 0.693 | 0.490 |
+| LogisticRegression | 0.867 | 0.406 | 0.331 | 0.525 |
 
 ## Project Structure
 
