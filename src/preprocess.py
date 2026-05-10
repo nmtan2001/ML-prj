@@ -31,12 +31,8 @@ def load_raw_data() -> pd.DataFrame:
 
 
 def preprocess_incremental() -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Process months incrementally to limit memory usage.
-
-    First pass: count total activity per station across all months.
-    Second pass: filter to selected stations and aggregate to hourly.
-    """
-    # Pass 1: accumulate station activity counts to select top stations
+    """Two-pass processing: count activity, then aggregate top stations to hourly."""
+    # Pass 1: count station activity
     print("Pass 1: Counting station activity across all months...")
     start_counts_all = pd.Series(dtype="int64")
     end_counts_all = pd.Series(dtype="int64")
@@ -74,7 +70,7 @@ def preprocess_incremental() -> tuple[pd.DataFrame, pd.DataFrame]:
     selected = set(active.index)
     print(f"  Selected {len(selected)} stations.")
 
-    # Pass 2: aggregate to hourly for selected stations only
+    # Pass 2: aggregate selected stations to hourly
     print("Pass 2: Aggregating selected stations to hourly...")
     hourly_frames = []
     station_coords = {}
@@ -164,10 +160,7 @@ def parse_timestamps(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def filter_stations(df: pd.DataFrame) -> pd.DataFrame:
-    """Filter to stations within the configured bounding box.
-
-    Matches trips where either the start OR end station is in the bounding box.
-    """
+    """Filter to stations within configured bounding box."""
     lat_col = "start_lat" if "start_lat" in df.columns else "latitude"
     lon_col = "start_lng" if "start_lng" in df.columns else "longitude"
     end_lat_col = "end_lat" if "end_lat" in df.columns else None
@@ -192,11 +185,7 @@ def filter_stations(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def select_active_stations(df: pd.DataFrame) -> tuple[pd.DataFrame, set]:
-    """Identify target stations and filter data to trips touching them.
-
-    Selects by total activity (departures + arrivals) to get balanced stations.
-    Returns filtered dataframe and the set of selected station IDs.
-    """
+    """Select top stations by activity, return filtered data and station set."""
     start_counts = df["start_station_id"].value_counts()
     end_counts = df["end_station_id"].value_counts()
     total_activity = start_counts.add(end_counts, fill_value=0)
@@ -226,10 +215,7 @@ def select_active_stations(df: pd.DataFrame) -> tuple[pd.DataFrame, set]:
 
 
 def aggregate_to_hourly(df: pd.DataFrame, selected_stations: set) -> pd.DataFrame:
-    """Aggregate trips to hourly departures and arrivals per station.
-
-    Only aggregates for stations in selected_stations.
-    """
+    """Aggregate trips to hourly departures/arrivals per station."""
     df["hour"] = df["started_at"].dt.floor("h")
 
     # Departures from selected stations
@@ -280,14 +266,7 @@ def build_station_info(hourly: pd.DataFrame) -> pd.DataFrame:
 
 
 def preprocess() -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Run full preprocessing pipeline using incremental loading.
-
-    Loads from cached parquet if available, otherwise reprocesses raw data.
-    Use --force-preprocess to override cache.
-
-    Returns:
-        Tuple of (hourly_data, station_info) DataFrames.
-    """
+    """Load cached parquet or reprocess raw data."""
     hourly_path = DATA_PROCESSED / "hourly.parquet"
     station_path = DATA_PROCESSED / "station_info.parquet"
     if hourly_path.exists() and station_path.exists():
