@@ -15,12 +15,8 @@ from src.evaluate import classification_metrics
 
 
 def _focal_loss_xgb(labels, preds, gamma=2.0, alpha=0.25):
-    """Custom XGBoost objective: focal loss for binary classification.
-
-    FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t)
-    Down-weights well-classified examples to focus on hard minority class.
-    """
-    preds = 1.0 / (1.0 + np.exp(-preds))  # sigmoid
+    """Focal loss objective for XGBoost binary classification."""
+    preds = 1.0 / (1.0 + np.exp(-preds))
     eps = 1e-7
     preds = np.clip(preds, eps, 1 - eps)
 
@@ -76,12 +72,7 @@ def _find_best_threshold(model, X_val, y_val) -> float:
 
 
 def train_risk_models(df: pd.DataFrame, target: str = "is_high_risk") -> list[dict]:
-    """Train and evaluate risk classification models with GridSearchCV.
-
-    Uses TimeSeriesSplit CV for hyperparameter tuning, then tunes the
-    decision threshold on the validation set. Returns results with
-    y_test and y_pred for confusion matrix plotting.
-    """
+    """Train risk classification models with GridSearchCV and threshold tuning."""
     from src.models.demand import time_split
 
     available_features = [c for c in FEATURE_COLS_RISK if c in df.columns]
