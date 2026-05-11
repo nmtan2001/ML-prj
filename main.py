@@ -171,15 +171,11 @@ def main():
     best_risk_model = max(risk_results, key=lambda r: r["F1"])
     test_df["predicted_risk"] = best_risk_model["y_pred"]
 
-    summary = test_df.groupby("station_id").agg(
-        predicted_demand=("predicted_departures", "mean"),
-        risk_frequency=("predicted_risk", "mean"),
-        avg_daily_demand=("predicted_departures", lambda x: x.sum() / test_df.loc[x.index, "hour"].dt.date.nunique()),
-        lat=("latitude", "first"),
-        lon=("longitude", "first"),
-    ).reset_index()
+    from models.prioritize import generate_station_summary
+    summary = generate_station_summary(test_df)
     ranked = compute_priority_score(summary)
-    print(ranked[["station_id", "priority_score"]].head(10))
+    print(ranked[["station_id", "priority_score", "predicted_demand", "risk_frequency",
+                   "max_consecutive_risk_hours", "capacity_strain"]].head(10))
 
     _save(plot_prioritization(ranked), "output_prioritization.png")
 
