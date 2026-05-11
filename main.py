@@ -174,8 +174,16 @@ def main():
     from models.prioritize import generate_station_summary
     summary = generate_station_summary(test_df)
     ranked = compute_priority_score(summary)
-    print(ranked[["station_id", "priority_score", "predicted_demand", "risk_frequency",
-                   "max_consecutive_risk_hours", "capacity_strain"]].head(10))
+
+    display_cols = ["station_id", "priority_score", "predicted_demand", "risk_frequency",
+                    "max_consecutive_risk_hours", "capacity_strain", "nearest_neighbor_km",
+                    "capacity", "lat", "lon"]
+    pd.set_option("display.max_columns", None)
+    pd.set_option("display.width", 200)
+    print(ranked[display_cols].to_string(index=False))
+
+    ranked.to_csv("output_prioritization.csv", index=False)
+    print(f"\nSaved full ranking to output_prioritization.csv ({len(ranked)} stations)")
 
     _save(plot_prioritization(ranked), "output_prioritization.png")
 
