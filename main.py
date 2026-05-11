@@ -8,12 +8,32 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 from preprocess import preprocess
 from simulate_docks import label_risk, simulate_inventory, simulate_and_label_cached
 from features import build_features
-from models.demand import train_demand_models, train_multi_target_models
+from models.demand import train_demand_models, train_multi_target_models, time_split, FEATURE_COLS_DEMAND
 from models.risk import train_risk_models
 from models.ensemble import train_ensemble
 from models.prioritize import compute_priority_score
-from evaluate import plot_model_comparison
+from evaluate import (
+    plot_model_comparison,
+    plot_confusion_matrix,
+    plot_predictions,
+    plot_temporal_patterns,
+    plot_weekly_trend,
+    plot_top_stations,
+    plot_station_map,
+    plot_net_flow,
+    plot_dock_utilization,
+    plot_risk_analysis,
+    plot_correlation_heatmap,
+    plot_demand_comparison,
+    plot_all_risk_confusion,
+    plot_prioritization,
+)
 import matplotlib.pyplot as plt
+
+
+def _save(fig: plt.Figure, path: str):
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
 
 
 def main():
@@ -37,11 +57,22 @@ def main():
     print("=" * 60)
     hourly = simulate_and_label_cached(hourly, station_info)
 
+    # EDA plots
+    _save(plot_temporal_patterns(hourly), "eda_temporal_patterns.png")
+    _save(plot_weekly_trend(hourly), "eda_weekly_trend.png")
+    _save(plot_top_stations(hourly), "eda_top_stations.png")
+    _save(plot_station_map(hourly), "eda_station_map.png")
+    _save(plot_net_flow(hourly), "eda_net_flow.png")
+    _save(plot_dock_utilization(hourly), "eda_dock_utilization.png")
+    _save(plot_risk_analysis(hourly), "eda_risk_analysis.png")
+
     # Step 3: Feature engineering
     print("\n" + "=" * 60)
     print("STEP 3: Feature engineering")
     print("=" * 60)
     df = build_features(hourly, target="departures")
+
+    _save(plot_correlation_heatmap(df), "eda_correlation.png")
 
     # Step 4: Task 1 - Demand forecasting
     print("\n" + "=" * 60)
@@ -66,6 +97,22 @@ def main():
         print(f"  {'Ensemble-Blend':20s} MAE={ensemble_result['MAE']:.4f}  "
               f"RMSE={ensemble_result['RMSE']:.4f}  WAPE={ensemble_result['WAPE']:.1f}%")
 
+    _save(plot_demand_comparison(demand_results), "output_demand_comparison.png")
+
+    # Scatter: best sklearn model predictions vs actual
+    _excluded_scatter = {"Naive", "HistAvg", "Ensemble-Blend", "skforecast-MultiSeries"}
+    sklearn_results = [r for r in demand_results if r["model"] not in _excluded_scatter]
+    if sklearn_results:
+        best_sk = min(sklearn_results, key=lambda r: r["MAE"])
+        avail = [c for c in FEATURE_COLS_DEMAND if c in df.columns]
+        _, _, test_df_scatter = time_split(df)
+        y_pred_scatter = best_sk["model_obj"].predict(test_df_scatter[avail])
+        _save(
+            plot_predictions(test_df_scatter["departures"], y_pred_scatter,
+                             title=f"Predicted vs Actual - {best_sk['model']}"),
+            "output_demand_scatter.png",
+        )
+
     # Step 4.5: Multi-target forecasting (departures + arrivals)
     print("\n" + "=" * 60)
     print("STEP 4.5: Multi-target forecasting")
@@ -74,7 +121,6 @@ def main():
 
     # Compute forecasted features for risk model
     print("Computing forecasted features for risk model...")
-    from models.demand import time_split, FEATURE_COLS_DEMAND
     _, _, test_df_mt = time_split(df)
     avail = [c for c in FEATURE_COLS_DEMAND if c in df.columns]
 
@@ -104,13 +150,14 @@ def main():
     for r in risk_results:
         print(f"  {r['model']:20s} Acc={r['Accuracy']:.4f}  F1={r['F1']:.4f}  Prec={r['Precision']:.4f}  Rec={r['Recall']:.4f}")
 
-    from evaluate import plot_confusion_matrix
     best_risk = max(risk_results, key=lambda r: r["F1"])
     fig_cm = plot_confusion_matrix(
         best_risk["y_test"], best_risk["y_pred"],
         title=f"Confusion Matrix - {best_risk['model']}",
     )
     fig_cm.savefig("output_risk_confusion.png", dpi=150, bbox_inches="tight")
+
+    _save(plot_all_risk_confusion(risk_results), "output_risk_all_confusion.png")
 
     # Step 6: Task 3 - Capacity prioritization (using model predictions)
     print("\n" + "=" * 60)
@@ -128,9 +175,13 @@ def main():
         predicted_demand=("predicted_departures", "mean"),
         risk_frequency=("predicted_risk", "mean"),
         avg_daily_demand=("predicted_departures", lambda x: x.sum() / test_df.loc[x.index, "hour"].dt.date.nunique()),
+        lat=("latitude", "first"),
+        lon=("longitude", "first"),
     ).reset_index()
     ranked = compute_priority_score(summary)
     print(ranked[["station_id", "priority_score"]].head(10))
+
+    _save(plot_prioritization(ranked), "output_prioritization.png")
 
     print("\nDone.")
 
