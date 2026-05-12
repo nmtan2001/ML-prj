@@ -6,6 +6,8 @@ from pathlib import Path
 import matplotlib
 matplotlib.use("Agg")
 
+import pandas as pd
+
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 from preprocess import preprocess
