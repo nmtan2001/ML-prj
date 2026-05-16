@@ -35,6 +35,54 @@ Predict hourly station-level demand, classify risk of dock overflow/emptiness, a
 | XGBoost-FocalLoss | 0.937 | 0.574 | 0.693 | 0.490 |
 | LogisticRegression | 0.867 | 0.406 | 0.331 | 0.525 |
 
+## Feature Engineering
+
+70+ features engineered across five categories. All lag/rolling features are shifted to prevent temporal leakage.
+
+| Category | Features |
+|----------|----------|
+| **Temporal** | Hour, day-of-week, month; cyclical sin/cos encodings; Fourier terms (24h, 168h, yearly); rush hour & weekend flags |
+| **Lag** | t-1h, 2h, 3h, 12h, 24h, 48h, 168h, 336h, 672h; same-hour rolling mean (3d, 7d); first-order difference |
+| **Rolling Stats** | Mean & std over 3h, 6h, 12h, 24h windows (shifted by 1); trend via lagged diff |
+| **Weather** | Temperature, humidity, precipitation, wind speed, apparent temperature; weather x time interactions |
+| **Spatial / Station** | KNN lag features (k=5); KMeans clusters (k=8) with cluster mean demand lags; smoothed target encoding; station x hour mean demand; weekend ratio per station; IsolationForest anomaly score |
+
+Holiday flags for NY state (including day-before/after). Target encoding computed on training data only.
+
+## Interpretation & Key Findings
+
+### Demand Patterns
+
+- **Seasonality:** 3.4x swing between peak (Sep: +60% above annual avg) and off-peak (Feb: -53%). Peak season runs Jun-Oct (40-60% above average).
+- **Rush hours:** Evening rush is 76% stronger than morning (26.7 vs 15.2 departures/hr), reflecting commuter one-way patterns -- residential in AM, business district in PM.
+- **Model insight:** Lag and temporal features are most predictive; weather features provide marginal additional gain.
+
+### Risk Hotspots
+
+High-risk = near-empty (<=2 bikes) OR near-full (>=90% dock utilization). 13.2% of station-hours are at risk overall.
+
+| Station | % Hours at Risk | Imbalance Type |
+|---------|-----------------|----------------|
+| 5980.10 | 33.8% | Mostly near-full |
+| 6756.01 | 28.7% | Mixed |
+| 6602.03 | 24.9% | Mostly near-empty |
+| 6173.08 | 24.4% | Mixed |
+| 6233.04 | 22.9% | Mostly near-full |
+
+23,701 near-empty hours (bikes unavailable) and 28,572 near-full hours (cannot return bikes). Estimated ~$1.3M unrealized revenue at $4.50/trip, ~30% reducible via proactive rebalancing.
+
+### Capacity Prioritization (Top 5)
+
+| Priority | Station | Score | Demand | Risk Freq | Strain |
+|----------|---------|-------|--------|-----------|--------|
+| #1 | 6233.04 | 0.884 | 14.4/hr | 23.0% | 0.41 |
+| #2 | 6140.05 | 0.846 | 14.0/hr | 21.0% | 0.40 |
+| #3 | 6331.01 | 0.686 | 10.7/hr | 20.6% | 0.30 |
+| #4 | 5788.13 | 0.685 | 11.9/hr | 18.1% | 0.34 |
+| #5 | 6492.08 | 0.665 | 10.8/hr | 21.9% | 0.31 |
+
+Top 2 stations score >0.84 and are clear expansion candidates -- 2x average demand with the same 35-dock capacity. Bottom 10 stations score <0.15.
+
 ## Project Structure
 
 ```
